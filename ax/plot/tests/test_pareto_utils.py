@@ -4,7 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import copy
+from unittest import mock
 from unittest.mock import patch
 
 import numpy as np
@@ -16,15 +19,18 @@ from ax.core.optimization_config import MultiObjectiveOptimizationConfig
 from ax.core.outcome_constraint import ObjectiveThreshold
 from ax.core.search_space import SearchSpace
 from ax.core.types import ComparisonOp
-from ax.exceptions.core import UnsupportedError
+from ax.exceptions.core import UserInputError
 from ax.metrics.branin import BraninMetric, NegativeBraninMetric
-from ax.modelbridge.registry import Models
-from ax.plot.pareto_frontier import interact_multiple_pareto_frontier
+from ax.modelbridge.registry import Generators
+from ax.plot.pareto_frontier import (
+    interact_multiple_pareto_frontier,
+    interact_pareto_frontier,
+)
 from ax.plot.pareto_utils import (
     _extract_observed_pareto_2d,
-    compute_posterior_pareto_frontier,
     get_observed_pareto_frontiers,
     infer_reference_point_from_experiment,
+    logger,
     to_nonrobust_search_space,
 )
 
@@ -40,47 +46,18 @@ from ax.utils.testing.core_stubs import (
 
 class ParetoUtilsTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         experiment = get_branin_experiment()
         experiment.add_tracking_metric(
             BraninMetric(name="m2", param_names=["x1", "x2"])
         )
-        sobol = Models.SOBOL(experiment.search_space)
+        sobol = Generators.SOBOL(experiment.search_space)
         a = sobol.gen(5)
         experiment.new_batch_trial(generator_run=a).run()
         self.experiment = experiment
         self.metrics = list(experiment.metrics.values())
 
-    def testComputePosteriorParetoFrontierByTrial(self) -> None:
-        # Experiments with batch trials must specify trial_index or data
-        with self.assertRaises(UnsupportedError):
-            compute_posterior_pareto_frontier(
-                self.experiment,
-                self.metrics[0],
-                self.metrics[1],
-                absolute_metrics=[m.name for m in self.metrics],
-            )
-        pfr = compute_posterior_pareto_frontier(
-            self.experiment,
-            self.metrics[0],
-            self.metrics[1],
-            trial_index=0,
-            absolute_metrics=[m.name for m in self.metrics],
-            num_points=2,
-        )
-        self.assertIsNone(pfr.arm_names)
-
-    def testComputePosteriorParetoFrontierByData(self) -> None:
-        # Experiments with batch trials must specify trial_index or data
-        compute_posterior_pareto_frontier(
-            self.experiment,
-            self.metrics[0],
-            self.metrics[1],
-            data=self.experiment.fetch_data(),
-            absolute_metrics=[m.name for m in self.metrics],
-            num_points=2,
-        )
-
-    def testObservedParetoFrontiers(self) -> None:
+    def test_get_observed_pareto_frontiers(self) -> None:
         experiment = get_branin_experiment_with_multi_objective(
             with_batch=True, has_optimization_config=False, with_status_quo=True
         )
@@ -109,12 +86,13 @@ class ParetoUtilsTest(TestCase):
                 minimize=True,
             ),
         ]
-        bounds = [0, -100, 0]
+        bounds = [0, 100, 1000]
+        rels = [True, True, False]
         objective_thresholds = [
             ObjectiveThreshold(
                 metric=objective.metric,
                 bound=bounds[i],
-                relative=True,
+                relative=rels[i],
                 op=ComparisonOp.LEQ,
             )
             for i, objective in enumerate(objectives)
@@ -147,38 +125,73 @@ class ParetoUtilsTest(TestCase):
         for i, pfr in enumerate(pfrs):
             self.assertEqual(pfr.primary_metric, true_pairs[i][0])
             self.assertEqual(pfr.secondary_metric, true_pairs[i][1])
-            self.assertEqual(pfr.absolute_metrics, [])
+            self.assertEqual(pfr.absolute_metrics, ["m3"])
             self.assertEqual(list(pfr.means.keys()), ["m1", "m2", "m3"])
             self.assertEqual(len(pfr.means["m1"]), len(pareto_arms))
             self.assertTrue(np.isnan(pfr.sems["m1"]).all())
-            # pyre-fixme[6]: For 1st param expected `Sized` but got
-            #  `Optional[List[Optional[str]]]`.
-            self.assertEqual(len(pfr.arm_names), len(pareto_arms))
+            self.assertEqual(len(pfr.arm_names), len(pareto_arms))  # pyre-ignore
+            self.assertEqual(pfr.objective_thresholds, {"m1": 0, "m2": 100, "m3": 1000})
+            # pyre-fixme[6]: For 1st argument expected `Union[_SupportsArray[dtype[ty...
             arm_idx = np.argsort(pfr.arm_names)
             for i, idx in enumerate(arm_idx):
                 name = pareto_arms[i]
-                # pyre-fixme[16]: Optional type has no attribute `__getitem__`.
-                self.assertEqual(pfr.arm_names[idx], name)
+                self.assertEqual(pfr.arm_names[idx], name)  # pyre-ignore
                 self.assertEqual(
                     pfr.param_dicts[idx], experiment.arms_by_name[name].parameters
                 )
-
+        pfrs = get_observed_pareto_frontiers(experiment=experiment, data=data, rel=True)
+        pfr = pfrs[0]
+        self.assertEqual(pfr.absolute_metrics, [])
+        self.assertEqual(
+            pfr.objective_thresholds,
+            {"m1": 0, "m2": 100, "m3": (1000 / sq_val - 1) * 100},
+        )
+        pfrs = get_observed_pareto_frontiers(
+            experiment=experiment, data=data, rel=False
+        )
+        pfr = pfrs[0]
+        self.assertEqual(pfr.absolute_metrics, ["m1", "m2", "m3"])
+        self.assertEqual(pfr.objective_thresholds, {"m1": sq_val, "m2": 0, "m3": 1000})
         pfrs = get_observed_pareto_frontiers(
             experiment=experiment, data=data, arm_names=["0_1"]
         )
         for pfr in pfrs:
-            # pyre-fixme[58]: `in` is not supported for right operand type
-            #  `Optional[typing.List[typing.Optional[str]]]`.
-            self.assertTrue("status_quo" in pfr.arm_names)
+            self.assertTrue("status_quo" in pfr.arm_names)  # pyre-ignore
 
-    def testPlotMultipleParetoFrontiers(self) -> None:
+        # Test with missing objective thresholds.
+        optimization_config._objective_thresholds = []
+        with self.assertRaisesRegex(UserInputError, "`rel` must be"):
+            get_observed_pareto_frontiers(experiment=experiment, data=data)
+        pfr = get_observed_pareto_frontiers(
+            experiment=experiment, data=data, rel=False
+        )[0]
+        self.assertEqual(pfr.absolute_metrics, ["m1", "m2", "m3"])
+        self.assertEqual(pfr.primary_metric, "m1")
+        self.assertEqual(pfr.secondary_metric, "m2")
+        self.assertEqual(len(pfr.means["m1"]), sum(df["metric_name"] == "m1"))
+        self.assertEqual(pfr.objective_thresholds, {})
+        pfr = get_observed_pareto_frontiers(experiment=experiment, data=data, rel=True)[
+            0
+        ]
+        self.assertEqual(pfr.absolute_metrics, [])
+
+    def test_PlotParetoFrontiers(self) -> None:
         experiment = get_branin_experiment_with_multi_objective(
             has_objective_thresholds=True,
         )
-        sobol = Models.SOBOL(experiment.search_space)
+        sobol = Generators.SOBOL(experiment.search_space)
         a = sobol.gen(5)
         experiment.new_batch_trial(generator_run=a).run()
+        experiment.fetch_data()
         pfrs = get_observed_pareto_frontiers(experiment=experiment)
+        label_dict = {"branin_a": "a_new_metric"}
+        b = interact_pareto_frontier(pfrs, label_dict=label_dict)
+        self.assertEqual(
+            b.data["layout"]["updatemenus"][0]["buttons"][0]["label"],
+            "a_new_metric<br>vs branin_b",
+        )
+        self.assertEqual(b.data["layout"]["xaxis"]["title"]["text"], "branin_b")
+        self.assertEqual(b.data["layout"]["yaxis"]["title"]["text"], "a_new_metric")
         pfrs2 = copy.deepcopy(pfrs)
         pfr_lists = {"pfrs 1": pfrs, "pfrs 2": pfrs2}
         self.assertIsNotNone(interact_multiple_pareto_frontier(pfr_lists))
@@ -227,22 +240,69 @@ class ParetoUtilsTest(TestCase):
 
 class TestInfereReferencePointFromExperiment(TestCase):
     def test_infer_reference_point_from_experiment(self) -> None:
-        for constrained in (True, False):
-            observations = [[-1.0, 1.0], [-0.5, 2.0], [-2.0, 0.5], [-0.1, 0.1]]
-            if constrained:
-                observations = [
-                    o + [c] for o, c in zip(observations, [1.0, 0.5, 1.0, 1.0])
-                ]
-            # Getting an experiment with 2 objectives by the above observations.
-            experiment = get_experiment_with_observations(
-                observations=observations,
-                minimize=True,
-                scalarized=False,
-                constrained=constrained,
-            )
+        observations = [[-1.0, 1.0], [-0.5, 2.0], [-2.0, 0.5], [-0.1, 0.1]]
+        # Getting an experiment with 2 objectives by the above observations.
+        experiment = get_experiment_with_observations(
+            observations=observations,
+            minimize=True,
+            scalarized=False,
+            constrained=False,
+        )
+        data = experiment.fetch_data()
+        inferred_reference_point = infer_reference_point_from_experiment(
+            experiment, data=data
+        )
+        # The nadir point for this experiment is [-0.5, 0.5]. The function actually
+        # deducts 0.1*Y_range from each of the objectives. Since the range for each
+        # of the objectives is +/-1.5, the inferred reference point would
+        # be [-0.35, 0.35].
+        self.assertEqual(inferred_reference_point[0].op, ComparisonOp.LEQ)
+        self.assertEqual(inferred_reference_point[0].bound, -0.35)
+        self.assertEqual(inferred_reference_point[0].metric.name, "m1")
+        self.assertEqual(inferred_reference_point[1].op, ComparisonOp.GEQ)
+        self.assertEqual(inferred_reference_point[1].bound, 0.35)
+        self.assertEqual(inferred_reference_point[1].metric.name, "m2")
 
-            inferred_reference_point = infer_reference_point_from_experiment(experiment)
+        with mock.patch(
+            "ax.plot.pareto_utils.get_pareto_frontier_and_configs",
+            return_value=([], [], [], []),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "No frontier observations found"):
+                infer_reference_point_from_experiment(experiment, data=data)
 
+    def test_constrained_infer_reference_point_from_experiment(self) -> None:
+        experiments = []
+        observations = [[-1.0, 1.0], [-0.5, 2.0], [-2.0, 0.5], [-0.1, 0.1]]
+        # adding constraint observations
+        observations = [o + [c] for o, c in zip(observations, [1.0, 0.5, 1.0, 1.0])]
+        # Getting an experiment with 2 objectives by the above observations.
+        experiment = get_experiment_with_observations(
+            observations=observations,
+            minimize=True,
+            scalarized=False,
+            constrained=True,
+        )
+        experiments.append(experiment)
+
+        # Special case: An experiment with no feasible observations.
+        # TODO: Use experiment clone function once D50804778 is landed.
+        experiment = copy.deepcopy(experiment)
+        # Ensure that no observation is feasible.
+        experiment.optimization_config.outcome_constraints[0].bound = 1000.0
+        experiments.append(experiment)
+
+        for experiment in experiments:
+            # special case logs a warning message.
+            data = experiment.fetch_data()
+            if experiment.optimization_config.outcome_constraints[0].bound == 1000.0:
+                with self.assertLogs(logger, "WARNING"):
+                    inferred_reference_point = infer_reference_point_from_experiment(
+                        experiment, data=data
+                    )
+            else:
+                inferred_reference_point = infer_reference_point_from_experiment(
+                    experiment, data=data
+                )
             # The nadir point for this experiment is [-0.5, 0.5]. The function actually
             # deducts 0.1*Y_range from each of the objectives. Since the range for each
             # of the objectives is +/-1.5, the inferred reference point would
@@ -321,7 +381,9 @@ class TestInfereReferencePointFromExperiment(TestCase):
                 obj_t_shuffled,
             ),
         ):
-            inferred_reference_point = infer_reference_point_from_experiment(experiment)
+            inferred_reference_point = infer_reference_point_from_experiment(
+                experiment, data=experiment.fetch_data()
+            )
 
             self.assertEqual(inferred_reference_point[0].op, ComparisonOp.LEQ)
             self.assertEqual(inferred_reference_point[0].bound, -0.35)

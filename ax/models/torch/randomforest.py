@@ -4,16 +4,17 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
-
 import numpy as np
+import numpy.typing as npt
 import torch
 from ax.core.search_space import SearchSpaceDigest
 from ax.core.types import TCandidateMetadata
 from ax.models.torch.utils import _datasets_to_legacy_inputs
-from ax.models.torch_base import TorchModel
+from ax.models.torch_base import TorchGenerator
 from ax.utils.common.docutils import copy_doc
 from botorch.utils.datasets import SupervisedDataset
 from sklearn.ensemble import RandomForestRegressor
@@ -21,7 +22,7 @@ from sklearn.tree import DecisionTreeRegressor
 from torch import Tensor
 
 
-class RandomForest(TorchModel):
+class RandomForest(TorchGenerator):
     """A Random Forest model.
 
     Uses a parametric bootstrap to handle uncertainty in Y.
@@ -36,20 +37,17 @@ class RandomForest(TorchModel):
         num_trees: Number of trees.
     """
 
-    def __init__(
-        self, max_features: Optional[str] = "sqrt", num_trees: int = 500
-    ) -> None:
+    def __init__(self, max_features: str | None = "sqrt", num_trees: int = 500) -> None:
         self.max_features = max_features
         self.num_trees = num_trees
-        self.models: List[RandomForestRegressor] = []
+        self.models: list[RandomForestRegressor] = []
 
-    @copy_doc(TorchModel.fit)
+    @copy_doc(TorchGenerator.fit)
     def fit(
         self,
-        datasets: List[SupervisedDataset],
-        metric_names: List[str],
+        datasets: list[SupervisedDataset],
         search_space_digest: SearchSpaceDigest,
-        candidate_metadata: Optional[List[List[TCandidateMetadata]]] = None,
+        candidate_metadata: list[list[TCandidateMetadata]] | None = None,
     ) -> None:
         Xs, Ys, Yvars = _datasets_to_legacy_inputs(datasets=datasets)
         for X, Y, Yvar in zip(Xs, Ys, Yvars):
@@ -63,19 +61,19 @@ class RandomForest(TorchModel):
                 )
             )
 
-    @copy_doc(TorchModel.predict)
-    def predict(self, X: Tensor) -> Tuple[Tensor, Tensor]:
+    @copy_doc(TorchGenerator.predict)
+    def predict(self, X: Tensor) -> tuple[Tensor, Tensor]:
         return _rf_predict(self.models, X)
 
-    @copy_doc(TorchModel.cross_validate)
+    @copy_doc(TorchGenerator.cross_validate)
     def cross_validate(  # pyre-ignore [14]: not using metric_names or ssd
         self,
-        datasets: List[SupervisedDataset],
+        datasets: list[SupervisedDataset],
         X_test: Tensor,
-        **kwargs: Any,
-    ) -> Tuple[Tensor, Tensor]:
+        use_posterior_predictive: bool = False,
+    ) -> tuple[Tensor, Tensor]:
         Xs, Ys, Yvars = _datasets_to_legacy_inputs(datasets=datasets)
-        cv_models: List[RandomForestRegressor] = []
+        cv_models: list[RandomForestRegressor] = []
         for X, Y, Yvar in zip(Xs, Ys, Yvars):
             cv_models.append(
                 _get_rf(
@@ -90,11 +88,11 @@ class RandomForest(TorchModel):
 
 
 def _get_rf(
-    X: np.ndarray,
-    Y: np.ndarray,
-    Yvar: np.ndarray,
+    X: npt.NDArray,
+    Y: npt.NDArray,
+    Yvar: npt.NDArray,
     num_trees: int,
-    max_features: Optional[str],
+    max_features: str | None,
 ) -> RandomForestRegressor:
     """Fit a Random Forest model.
 
@@ -120,8 +118,8 @@ def _get_rf(
 
 
 def _rf_predict(
-    models: List[RandomForestRegressor], X: Tensor
-) -> Tuple[Tensor, Tensor]:
+    models: list[RandomForestRegressor], X: Tensor
+) -> tuple[Tensor, Tensor]:
     """Make predictions with Random Forest models.
 
     Args:

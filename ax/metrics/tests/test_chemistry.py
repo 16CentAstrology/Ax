@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from enum import Enum
 from unittest import mock
 
@@ -17,11 +19,12 @@ from ax.utils.testing.core_stubs import get_trial
 
 
 class DummyEnum(Enum):
+    # pyre-fixme[35]: Target cannot be annotated.
     DUMMY: str = "dummy"
 
 
 class ChemistryMetricTest(TestCase):
-    def testChemistryMetric(self) -> None:
+    def test_ChemistryMetric(self) -> None:
         # basic test
         read_csv = pd.read_csv
         for problem_type in (

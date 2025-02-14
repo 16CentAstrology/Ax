@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from contextlib import ExitStack
 from enum import Enum
 from math import sqrt
@@ -19,11 +21,12 @@ from sklearn.ensemble import RandomForestClassifier
 
 
 class DummyEnum(Enum):
-    DUMMY: str = "dummy"
+    _value_: str
+    DUMMY = "dummy"
 
 
 class SklearnMetricTest(TestCase):
-    def testSklearnMetric(self) -> None:
+    def test_SklearnMetric(self) -> None:
         # test not implemented dataset
         with self.assertRaises(NotImplementedError):
             SklearnMetric(
@@ -74,8 +77,6 @@ class SklearnMetricTest(TestCase):
             params = {"max_depth": 2, "min_samples_split": 0.5}
             trial = get_trial()
             trial._generator_run = GeneratorRun(
-                # pyre-fixme[6]: For 2nd param expected `Dict[str, Union[None, bool,
-                #  float, int, str]]` but got `Dict[str, float]`.
                 arms=[Arm(name="0_0", parameters=params)]
             )
             df = metric.fetch_trial_data(trial).unwrap().df

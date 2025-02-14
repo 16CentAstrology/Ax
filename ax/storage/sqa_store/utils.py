@@ -4,8 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import warnings
-from typing import Any, List, Optional
+from typing import Any
 
 from ax.core.experiment import Experiment
 from ax.core.search_space import SearchSpace
@@ -35,6 +37,10 @@ COPY_DB_IDS_ATTRS_TO_SKIP = {
     "_seen_trial_indices_by_status",
     "_steps",
     "analysis_scheduler",
+    "_nodes",
+    # For auxiliary experiments, we don't expect any updates, so we
+    # don't need to recur into them during `copy_db_ids`.
+    "auxiliary_experiments_by_purpose",
 }
 SKIP_ATTRS_ERROR_SUFFIX = "Consider adding to COPY_DB_IDS_ATTRS_TO_SKIP if appropriate."
 
@@ -45,7 +51,7 @@ def is_foreign_key_field(field: str) -> bool:
 
 
 # pyre-fixme[2]: Parameter annotation cannot be `Any`.
-def copy_db_ids(source: Any, target: Any, path: Optional[List[str]] = None) -> None:
+def copy_db_ids(source: Any, target: Any, path: list[str] | None = None) -> None:
     """Takes as input two objects, `source` and `target`, that should be identical,
     except that `source` has _db_ids set and `target` doesn't. Recursively copies the
     _db_ids from `source` to `target`.
@@ -67,7 +73,7 @@ def copy_db_ids(source: Any, target: Any, path: Optional[List[str]] = None) -> N
         # introducing infinite loops
         raise SQADecodeError(error_message_prefix + "Encountered path of length > 10.")
 
-    if type(source) != type(target):
+    if type(source) is not type(target):
         if not issubclass(type(target), type(source)):
             if source is None and isinstance(target, SearchSpace):
                 warnings.warn(
@@ -142,9 +148,13 @@ def copy_db_ids(source: Any, target: Any, path: Optional[List[str]] = None) -> N
             source = sorted(source)
             target = sorted(target)
         except TypeError as e:
-            raise SQADecodeError(
-                error_message_prefix + f"TypeError encountered during sorting: {e}"
-            )
+            if any(isinstance(o, Base) for o in source + target):
+                raise SQADecodeError(
+                    error_message_prefix + f"TypeError encountered during sorting: {e}"
+                )
+            else:
+                # source and target are not lists of things that need to be saved
+                return
 
         for index, x in enumerate(source):
             copy_db_ids(x, target[index], path + [str(index)])

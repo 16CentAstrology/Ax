@@ -4,27 +4,31 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 from collections import defaultdict
 from logging import Logger
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 from ax.core.observation import Observation, ObservationData, ObservationFeatures
 from ax.core.optimization_config import OptimizationConfig
 from ax.core.outcome_constraint import OutcomeConstraint, ScalarizedOutcomeConstraint
 from ax.core.search_space import SearchSpace
+from ax.exceptions.core import DataRequiredError
 from ax.modelbridge.transforms.base import Transform
 from ax.modelbridge.transforms.utils import get_data, match_ci_width_truncated
 from ax.models.types import TConfig
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast_list
+from ax.utils.common.typeutils import assert_is_instance_list
+from pyre_extensions import assert_is_instance
 from sklearn.preprocessing import PowerTransformer
 
 if TYPE_CHECKING:
     # import as module to make sphinx-autodoc-typehints happy
-    from ax import modelbridge as modelbridge_module  # noqa F401  # pragma: no cover
+    from ax import modelbridge as modelbridge_module  # noqa F401
 
 
 logger: Logger = get_logger(__name__)
@@ -50,24 +54,34 @@ class PowerTransformY(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[List[Observation]] = None,
-        modelbridge: Optional[modelbridge_module.base.ModelBridge] = None,
-        config: Optional[TConfig] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
+        modelbridge: modelbridge_module.base.Adapter | None = None,
+        config: TConfig | None = None,
     ) -> None:
-        assert observations is not None, "PowerTransformY requires observations"
-        if config is None:
-            raise ValueError("PowerTransform requires a config.")
-        # pyre-fixme[6]: Same issue as for LogY
-        metric_names = list(config.get("metrics", []))
-        if len(metric_names) == 0:
-            raise ValueError("Must specify at least one metric in the config.")
-        # pyre-fixme[4]: Attribute must be annotated.
-        self.clip_mean = config.get("clip_mean", True)
-        # pyre-fixme[4]: Attribute must be annotated.
-        self.metric_names = metric_names
+        """Initialize the ``PowerTransformY`` transform.
+
+        Args:
+            search_space: The search space of the experiment. Unused.
+            observations: A list of observations from the experiment.
+            modelbridge: The `Adapter` within which the transform is used. Unused.
+            config: A dictionary of options to control the behavior of the transform.
+                Can contain the following keys:
+                - "metrics": A list of metric names to apply the transform to. If
+                    omitted, all metrics found in `observations` are transformed.
+                - "clip_mean": Whether to clip the mean to the image of the transform.
+                    Defaults to True.
+        """
+        if observations is None or len(observations) == 0:
+            raise DataRequiredError("PowerTransformY requires observations.")
+        # pyre-fixme[9]: Can't annotate config["metrics"] properly.
+        metric_names: list[str] | None = config.get("metrics", None) if config else None
+        self.clip_mean: bool = (
+            assert_is_instance(config.get("clip_mean", True), bool) if config else True
+        )
         observation_data = [obs.data for obs in observations]
         Ys = get_data(observation_data=observation_data, metric_names=metric_names)
+        self.metric_names: list[str] = list(Ys.keys())
         # pyre-fixme[4]: Attribute must be annotated.
         self.power_transforms = _compute_power_transforms(Ys=Ys)
         # pyre-fixme[4]: Attribute must be annotated.
@@ -75,8 +89,8 @@ class PowerTransformY(Transform):
 
     def _transform_observation_data(
         self,
-        observation_data: List[ObservationData],
-    ) -> List[ObservationData]:
+        observation_data: list[ObservationData],
+    ) -> list[ObservationData]:
         """Winsorize observation data in place."""
         for obsd in observation_data:
             for i, m in enumerate(obsd.metric_names):
@@ -93,8 +107,8 @@ class PowerTransformY(Transform):
 
     def _untransform_observation_data(
         self,
-        observation_data: List[ObservationData],
-    ) -> List[ObservationData]:
+        observation_data: list[ObservationData],
+    ) -> list[ObservationData]:
         """Winsorize observation data in place."""
         for obsd in observation_data:
             for i, m in enumerate(obsd.metric_names):
@@ -102,7 +116,7 @@ class PowerTransformY(Transform):
                     l, u = self.inv_bounds[m]
                     transform = self.power_transforms[m].inverse_transform
                     if not self.clip_mean and (obsd.means[i] < l or obsd.means[i] > u):
-                        raise ValueError(  # pragma: no cover
+                        raise ValueError(
                             "Can't untransform mean outside the bounds without clipping"
                         )
                     obsd.means[i], obsd.covariance[i, i] = match_ci_width_truncated(
@@ -118,8 +132,8 @@ class PowerTransformY(Transform):
     def transform_optimization_config(
         self,
         optimization_config: OptimizationConfig,
-        modelbridge: Optional[modelbridge_module.base.ModelBridge] = None,
-        fixed_features: Optional[ObservationFeatures] = None,
+        modelbridge: modelbridge_module.base.Adapter | None = None,
+        fixed_features: ObservationFeatures | None = None,
     ) -> OptimizationConfig:
         for c in optimization_config.all_constraints:
             if isinstance(c, ScalarizedOutcomeConstraint):
@@ -143,14 +157,12 @@ class PowerTransformY(Transform):
 
     def untransform_outcome_constraints(
         self,
-        outcome_constraints: List[OutcomeConstraint],
-        fixed_features: Optional[ObservationFeatures] = None,
-    ) -> List[OutcomeConstraint]:
+        outcome_constraints: list[OutcomeConstraint],
+        fixed_features: ObservationFeatures | None = None,
+    ) -> list[OutcomeConstraint]:
         for c in outcome_constraints:
             if isinstance(c, ScalarizedOutcomeConstraint):
-                raise ValueError(  # pragma: no cover
-                    "ScalarizedOutcomeConstraint not supported here"
-                )
+                raise ValueError("ScalarizedOutcomeConstraint not supported here")
             elif c.metric.name in self.metric_names:
                 if c.relative:
                     raise ValueError("Relative constraints not supported here.")
@@ -161,8 +173,8 @@ class PowerTransformY(Transform):
 
 
 def _compute_power_transforms(
-    Ys: Dict[str, List[float]]
-) -> Dict[str, PowerTransformer]:
+    Ys: dict[str, list[float]],
+) -> dict[str, PowerTransformer]:
     """Compute power transforms."""
     power_transforms = {}
     for k, ys in Ys.items():
@@ -173,8 +185,8 @@ def _compute_power_transforms(
 
 
 def _compute_inverse_bounds(
-    power_transforms: Dict[str, PowerTransformer], tol: float = 1e-10
-) -> Dict[str, Tuple[float, float]]:
+    power_transforms: dict[str, PowerTransformer], tol: float = 1e-10
+) -> dict[str, tuple[float, float]]:
     """Computes the image of the transform so we can clip when we untransform.
 
     The inverse of the Yeo-Johnson transform is given by:
@@ -204,5 +216,5 @@ def _compute_inverse_bounds(
             bounds[1] = (-1.0 / lambda_ - mu) / sigma
         elif lambda_ > 2.0 + tol:
             bounds[0] = (1.0 / (2.0 - lambda_) - mu) / sigma
-        inv_bounds[k] = tuple(checked_cast_list(float, bounds))
+        inv_bounds[k] = tuple(assert_is_instance_list(bounds, float))
     return inv_bounds

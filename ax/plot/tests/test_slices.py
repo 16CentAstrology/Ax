@@ -4,8 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import plotly.graph_objects as go
-from ax.modelbridge.registry import Models
+from ax.modelbridge.registry import Generators
 from ax.plot.base import AxPlotConfig
 from ax.plot.slice import (
     interact_slice,
@@ -15,15 +17,15 @@ from ax.plot.slice import (
 )
 from ax.utils.common.testutils import TestCase
 from ax.utils.testing.core_stubs import get_branin_experiment
-from ax.utils.testing.mock import fast_botorch_optimize
+from ax.utils.testing.mock import mock_botorch_optimize
 
 
 class SlicesTest(TestCase):
-    @fast_botorch_optimize
-    def testSlices(self) -> None:
+    @mock_botorch_optimize
+    def test_Slices(self) -> None:
         exp = get_branin_experiment(with_batch=True)
         exp.trials[0].run()
-        model = Models.BOTORCH(
+        model = Generators.BOTORCH_MODULAR(
             # Model bridge kwargs
             experiment=exp,
             data=exp.fetch_data(),
@@ -31,7 +33,7 @@ class SlicesTest(TestCase):
         # Assert that each type of plot can be constructed successfully
         plot = plot_slice_plotly(
             model,
-            # pyre-fixme[16]: `ModelBridge` has no attribute `parameters`.
+            # pyre-fixme[16]: `Adapter` has no attribute `parameters`.
             model.parameters[0],
             list(model.metric_names)[0],
         )

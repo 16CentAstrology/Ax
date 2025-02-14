@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import math
 
 from ax.metrics.noisy_function import GenericNoisyFunctionMetric
@@ -12,7 +14,7 @@ from ax.utils.testing.core_stubs import get_trial
 
 
 class GenericNoisyFunctionMetricTest(TestCase):
-    def testGenericNoisyFunctionMetric(self) -> None:
+    def test_GenericNoisyFunctionMetric(self) -> None:
         # pyre-fixme[3]: Return type must be annotated.
         # pyre-fixme[2]: Parameter must be annotated.
         def f(params):

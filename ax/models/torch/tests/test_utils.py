@@ -4,8 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import warnings
-from copy import deepcopy
+from collections import OrderedDict
 
 import numpy as np
 import torch
@@ -13,53 +15,64 @@ from ax.core.search_space import SearchSpaceDigest
 from ax.exceptions.core import AxWarning, UnsupportedError
 from ax.models.torch.botorch_modular.utils import (
     _get_shared_rows,
-    _tensor_difference,
     choose_botorch_acqf_class,
     choose_model_class,
     construct_acquisition_and_optimizer_options,
     convert_to_block_design,
-    disable_one_to_many_transforms,
+    subset_state_dict,
     use_model_list,
 )
+from ax.models.torch.utils import _to_inequality_constraints
+from ax.models.torch_base import TorchOptConfig
 from ax.utils.common.constants import Keys
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import checked_cast
 from ax.utils.testing.torch_stubs import get_torch_test_data
-from botorch.acquisition.monte_carlo import qNoisyExpectedImprovement
-from botorch.acquisition.multi_objective.monte_carlo import (
-    qNoisyExpectedHypervolumeImprovement,
+from botorch.acquisition import qLogNoisyExpectedImprovement
+from botorch.acquisition.multi_objective.logei import (
+    qLogNoisyExpectedHypervolumeImprovement,
 )
-from botorch.models.gp_regression import FixedNoiseGP, SingleTaskGP
-from botorch.models.gp_regression_fidelity import (
-    FixedNoiseMultiFidelityGP,
-    SingleTaskMultiFidelityGP,
-)
+from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
+from botorch.models.gp_regression import SingleTaskGP
+from botorch.models.gp_regression_fidelity import SingleTaskMultiFidelityGP
 from botorch.models.gp_regression_mixed import MixedSingleTaskGP
-from botorch.models.model import ModelList
-from botorch.models.multitask import FixedNoiseMultiTaskGP, MultiTaskGP
-from botorch.models.transforms.input import (
-    ChainedInputTransform,
-    InputPerturbation,
-    InputTransform,
-    Normalize,
-)
-from botorch.utils.datasets import FixedNoiseDataset, SupervisedDataset
-from botorch.utils.testing import MockModel, MockPosterior
+from botorch.models.model_list_gp_regression import ModelListGP
+from botorch.models.multitask import MultiTaskGP
+from botorch.utils.datasets import SupervisedDataset
+from pyre_extensions import assert_is_instance, none_throws
 
 
-class BoTorchModelUtilsTest(TestCase):
+class BoTorchGeneratorUtilsTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.dtype = torch.float
-        self.Xs, self.Ys, self.Yvars, _, _, _, _ = get_torch_test_data(dtype=self.dtype)
+        (
+            self.Xs,
+            self.Ys,
+            self.Yvars,
+            _,
+            _,
+            self.feature_names,
+            self.metric_names,
+        ) = get_torch_test_data(dtype=self.dtype)
         self.Xs2, self.Ys2, self.Yvars2, _, _, _, _ = get_torch_test_data(
-            dtype=self.dtype, offset=1.0  # Making this data different.
+            dtype=self.dtype,
+            offset=1.0,  # Making this data different.
         )
         self.fixed_noise_datasets = [
-            FixedNoiseDataset(X=X, Y=Y, Yvar=Yvar)
-            for X, Y, Yvar in zip(self.Xs, self.Ys, self.Yvars)
+            SupervisedDataset(
+                X=X,
+                Y=Y,
+                Yvar=Yvar,
+                feature_names=self.feature_names,
+                outcome_names=[mn],
+            )
+            for X, Y, Yvar, mn in zip(self.Xs, self.Ys, self.Yvars, self.metric_names)
         ]
         self.supervised_datasets = [
-            SupervisedDataset(X=X, Y=Y) for X, Y, in zip(self.Xs, self.Ys)
+            SupervisedDataset(
+                X=X, Y=Y, feature_names=self.feature_names, outcome_names=[mn]
+            )
+            for X, Y, mn in zip(self.Xs, self.Ys, self.metric_names)
         ]
         self.none_Yvars = [torch.tensor([[np.nan], [np.nan]])]
         self.task_features = []
@@ -87,30 +100,19 @@ class BoTorchModelUtilsTest(TestCase):
                     fidelity_features=[1],
                 ),
             )
-        # With fidelity features and unknown variances, use SingleTaskMultiFidelityGP.
-        self.assertEqual(
-            SingleTaskMultiFidelityGP,
-            choose_model_class(
-                datasets=self.supervised_datasets,
-                search_space_digest=SearchSpaceDigest(
-                    feature_names=[],
-                    bounds=[],
-                    fidelity_features=[2],
+        # With fidelity features, use SingleTaskMultiFidelityGP.
+        for ds in [self.supervised_datasets, self.fixed_noise_datasets]:
+            self.assertEqual(
+                SingleTaskMultiFidelityGP,
+                choose_model_class(
+                    datasets=ds,
+                    search_space_digest=SearchSpaceDigest(
+                        feature_names=[],
+                        bounds=[],
+                        fidelity_features=[2],
+                    ),
                 ),
-            ),
-        )
-        # With fidelity features and known variances, use FixedNoiseMultiFidelityGP.
-        self.assertEqual(
-            FixedNoiseMultiFidelityGP,
-            choose_model_class(
-                datasets=self.fixed_noise_datasets,
-                search_space_digest=SearchSpaceDigest(
-                    feature_names=[],
-                    bounds=[],
-                    fidelity_features=[2],
-                ),
-            ),
-        )
+            )
 
     def test_choose_model_class_task_features(self) -> None:
         # Only a single task feature can be used.
@@ -121,26 +123,17 @@ class BoTorchModelUtilsTest(TestCase):
                     feature_names=[], bounds=[], task_features=[1, 2]
                 ),
             )
-        # With fidelity features and unknown variances, use SingleTaskMultiFidelityGP.
-        self.assertEqual(
-            MultiTaskGP,
-            choose_model_class(
-                datasets=self.supervised_datasets,
-                search_space_digest=SearchSpaceDigest(
-                    feature_names=[], bounds=[], task_features=[1]
+        # With task features use MultiTaskGP.
+        for datasets in (self.supervised_datasets, self.fixed_noise_datasets):
+            self.assertEqual(
+                MultiTaskGP,
+                choose_model_class(
+                    datasets=datasets,
+                    search_space_digest=SearchSpaceDigest(
+                        feature_names=[], bounds=[], task_features=[1]
+                    ),
                 ),
-            ),
-        )
-        # With fidelity features and known variances, use FixedNoiseMultiFidelityGP.
-        self.assertEqual(
-            FixedNoiseMultiTaskGP,
-            choose_model_class(
-                datasets=self.fixed_noise_datasets,
-                search_space_digest=SearchSpaceDigest(
-                    feature_names=[], bounds=[], task_features=[1]
-                ),
-            ),
-        )
+            )
 
     def test_choose_model_class_discrete_features(self) -> None:
         # With discrete features, use MixedSingleTaskyGP.
@@ -169,42 +162,37 @@ class BoTorchModelUtilsTest(TestCase):
                     bounds=[],
                 ),
             )
-        # Without fidelity/task features but with Yvar specifications, use FixedNoiseGP.
-        self.assertEqual(
-            FixedNoiseGP,
-            choose_model_class(
-                datasets=self.fixed_noise_datasets,
-                search_space_digest=SearchSpaceDigest(
-                    feature_names=[],
-                    bounds=[],
+        # Without fidelity/task features, use SingleTaskGP.
+        for ds in [self.fixed_noise_datasets, self.supervised_datasets]:
+            self.assertEqual(
+                SingleTaskGP,
+                choose_model_class(
+                    datasets=ds,
+                    search_space_digest=SearchSpaceDigest(
+                        feature_names=[],
+                        bounds=[],
+                    ),
                 ),
-            ),
-        )
-        # W/out fidelity/task features and w/out Yvar specifications, use SingleTaskGP.
-        self.assertEqual(
-            SingleTaskGP,
-            choose_model_class(
-                datasets=self.supervised_datasets,
-                search_space_digest=SearchSpaceDigest(
-                    feature_names=[],
-                    bounds=[],
-                ),
-            ),
-        )
+            )
 
     def test_choose_botorch_acqf_class(self) -> None:
-        self.assertEqual(qNoisyExpectedImprovement, choose_botorch_acqf_class())
         self.assertEqual(
-            qNoisyExpectedHypervolumeImprovement,
-            choose_botorch_acqf_class(objective_thresholds=self.objective_thresholds),
+            qLogNoisyExpectedImprovement,
+            choose_botorch_acqf_class(
+                torch_opt_config=TorchOptConfig(
+                    objective_weights=torch.tensor([1.0, 0.0]),
+                    is_moo=False,
+                )
+            ),
         )
         self.assertEqual(
-            qNoisyExpectedHypervolumeImprovement,
-            choose_botorch_acqf_class(objective_weights=torch.tensor([0.5, 0.5])),
-        )
-        self.assertEqual(
-            qNoisyExpectedImprovement,
-            choose_botorch_acqf_class(objective_weights=torch.tensor([1.0, 0.0])),
+            qLogNoisyExpectedHypervolumeImprovement,
+            choose_botorch_acqf_class(
+                torch_opt_config=TorchOptConfig(
+                    objective_weights=torch.tensor([1.0, -1.0]),
+                    is_moo=True,
+                )
+            ),
         )
 
     def test_construct_acquisition_and_optimizer_options(self) -> None:
@@ -250,38 +238,116 @@ class BoTorchModelUtilsTest(TestCase):
         )
         self.assertFalse(  # Batched multi-output case.
             use_model_list(
-                datasets=[SupervisedDataset(X=self.Xs[0], Y=Y) for Y in self.Ys],
+                datasets=[
+                    SupervisedDataset(
+                        X=self.Xs[0],
+                        Y=Y,
+                        feature_names=self.feature_names,
+                        outcome_names=["y"],
+                    )
+                    for Y in self.Ys
+                ],
                 botorch_model_class=SingleTaskGP,
+            )
+        )
+        # Multi-output with allow_batched_models
+        self.assertFalse(
+            use_model_list(
+                datasets=2
+                * [
+                    SupervisedDataset(
+                        X=self.Xs[0],
+                        Y=Y,
+                        feature_names=self.feature_names,
+                        outcome_names=["y"],
+                    )
+                    for Y in self.Ys
+                ],
+                botorch_model_class=SingleTaskGP,
+                allow_batched_models=True,
+            )
+        )
+        self.assertTrue(
+            use_model_list(
+                datasets=2
+                * [
+                    SupervisedDataset(
+                        X=self.Xs[0],
+                        Y=Y,
+                        feature_names=self.feature_names,
+                        outcome_names=["y"],
+                    )
+                    for Y in self.Ys
+                ],
+                botorch_model_class=SingleTaskGP,
+                allow_batched_models=False,
             )
         )
         self.assertTrue(
             use_model_list(
                 datasets=[
-                    SupervisedDataset(X=self.Xs[0], Y=self.Ys[0]),
-                    SupervisedDataset(X=self.Xs2[0], Y=self.Ys2[0]),
+                    SupervisedDataset(
+                        X=self.Xs[0],
+                        Y=self.Ys[0],
+                        feature_names=self.feature_names,
+                        outcome_names=["y"],
+                    ),
+                    SupervisedDataset(
+                        X=self.Xs2[0],
+                        Y=self.Ys2[0],
+                        feature_names=self.feature_names,
+                        outcome_names=["y"],
+                    ),
                 ],
                 botorch_model_class=SingleTaskGP,
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             use_model_list(
                 datasets=self.supervised_datasets, botorch_model_class=MultiTaskGP
             )
         )
+        # Not using model list with single outcome.
+        self.assertFalse(
+            use_model_list(
+                datasets=self.supervised_datasets,
+                botorch_model_class=SaasFullyBayesianSingleTaskGP,
+            )
+        )
+        # Using it with multiple outcomes.
+        self.assertTrue(
+            use_model_list(
+                datasets=[
+                    SupervisedDataset(
+                        X=self.Xs[0],
+                        Y=self.Ys[0],
+                        feature_names=self.feature_names,
+                        outcome_names=["y"],
+                    ),
+                    SupervisedDataset(
+                        X=self.Xs2[0],
+                        Y=self.Ys2[0],
+                        feature_names=self.feature_names,
+                        outcome_names=["y"],
+                    ),
+                ],
+                botorch_model_class=SaasFullyBayesianSingleTaskGP,
+            )
+        )
+        self.assertTrue(
+            use_model_list(
+                datasets=[
+                    SupervisedDataset(
+                        X=self.Xs[0],
+                        Y=self.Ys[0].repeat(1, 2),
+                        feature_names=self.feature_names,
+                        outcome_names=["y1", "y2"],
+                    ),
+                ],
+                botorch_model_class=SaasFullyBayesianSingleTaskGP,
+            )
+        )
 
-    def test_tensor_difference(self) -> None:
-        n, m = 3, 2
-        A = torch.arange(n * m).reshape(n, m)
-        B = torch.cat((A[: n - 1], torch.randn(2, m)), dim=0)
-        # permute B
-        B = B[torch.randperm(len(B))]
-
-        C = _tensor_difference(A=A, B=B)
-
-        self.assertEqual(C.size(dim=0), 2)
-
-
-class ConvertToBlockDesignTest(TestCase):
     def test_get_shared_rows(self) -> None:
         X1 = torch.rand(4, 2)
 
@@ -319,131 +385,137 @@ class ConvertToBlockDesignTest(TestCase):
         # simple case: block design, supervised
         X = torch.rand(4, 2)
         Ys = [torch.rand(4, 1), torch.rand(4, 1)]
-        datasets = [SupervisedDataset(X=X, Y=Y) for Y in Ys]
         metric_names = ["y1", "y2"]
-        new_datasets, new_metric_names = convert_to_block_design(
-            datasets=datasets,
-            metric_names=metric_names,
-        )
+        datasets = [
+            SupervisedDataset(
+                X=X,
+                Y=Ys[i],
+                feature_names=["x1", "x2"],
+                outcome_names=[metric_names[i]],
+            )
+            for i in range(2)
+        ]
+        new_datasets = convert_to_block_design(datasets=datasets)
         self.assertEqual(len(new_datasets), 1)
         self.assertIsInstance(new_datasets[0], SupervisedDataset)
-        self.assertTrue(torch.equal(new_datasets[0].X(), X))
-        self.assertTrue(torch.equal(new_datasets[0].Y(), torch.cat(Ys, dim=-1)))
-        self.assertEqual(new_metric_names, ["y1_y2"])
+        self.assertTrue(torch.equal(new_datasets[0].X, X))
+        self.assertTrue(torch.equal(new_datasets[0].Y, torch.cat(Ys, dim=-1)))
+        self.assertEqual(new_datasets[0].outcome_names, metric_names)
 
         # simple case: block design, fixed
         Yvars = [torch.rand(4, 1), torch.rand(4, 1)]
         datasets = [
-            FixedNoiseDataset(X=X, Y=Y, Yvar=Yvar) for Y, Yvar in zip(Ys, Yvars)
+            SupervisedDataset(
+                X=X,
+                Y=Ys[i],
+                Yvar=Yvars[i],
+                feature_names=["x1", "x2"],
+                outcome_names=[metric_names[i]],
+            )
+            for i in range(2)
         ]
-        new_datasets, new_metric_names = convert_to_block_design(
-            datasets=datasets,
-            metric_names=metric_names,
-        )
+        new_datasets = convert_to_block_design(datasets=datasets)
         self.assertEqual(len(new_datasets), 1)
-        self.assertIsInstance(new_datasets[0], FixedNoiseDataset)
-        self.assertTrue(torch.equal(new_datasets[0].X(), X))
-        self.assertTrue(torch.equal(new_datasets[0].Y(), torch.cat(Ys, dim=-1)))
-        # pyre-fixme[16]: `SupervisedDataset` has no attribute `Yvar`.
-        self.assertTrue(torch.equal(new_datasets[0].Yvar(), torch.cat(Yvars, dim=-1)))
-        self.assertEqual(new_metric_names, ["y1_y2"])
+        self.assertIsNotNone(new_datasets[0].Yvar)
+        self.assertTrue(torch.equal(new_datasets[0].X, X))
+        self.assertTrue(torch.equal(new_datasets[0].Y, torch.cat(Ys, dim=-1)))
+        self.assertTrue(
+            torch.equal(none_throws(new_datasets[0].Yvar), torch.cat(Yvars, dim=-1))
+        )
+        self.assertEqual(new_datasets[0].outcome_names, metric_names)
 
         # test error is raised if not block design and force=False
         X2 = torch.cat((X[:3], torch.rand(1, 2)))
-        datasets = [SupervisedDataset(X=X, Y=Y) for X, Y in zip((X, X2), Ys)]
+        datasets = [
+            SupervisedDataset(
+                X=X, Y=Y, feature_names=["x1", "x2"], outcome_names=[name]
+            )
+            for X, Y, name in zip((X, X2), Ys, metric_names)
+        ]
         with self.assertRaisesRegex(
             UnsupportedError, "Cannot convert data to non-block design data."
         ):
-            convert_to_block_design(datasets=datasets, metric_names=metric_names)
+            convert_to_block_design(datasets=datasets)
 
         # test warning is issued if not block design and force=True (supervised)
         with warnings.catch_warnings(record=True) as ws:
-            new_datasets, new_metric_names = convert_to_block_design(
-                datasets=datasets, metric_names=metric_names, force=True
-            )
+            new_datasets = convert_to_block_design(datasets=datasets, force=True)
         # pyre-fixme[6]: For 1st param expected `Iterable[object]` but got `bool`.
         self.assertTrue(any(issubclass(w.category, AxWarning)) for w in ws)
         self.assertTrue(
             any(
-                "Forcing converion of data not complying to a block design"
+                "Forcing conversion of data not complying to a block design"
                 in str(w.message)
                 for w in ws
             )
         )
         self.assertEqual(len(new_datasets), 1)
-        self.assertIsInstance(new_datasets[0], SupervisedDataset)
-        self.assertTrue(torch.equal(new_datasets[0].X(), X[:3]))
+        self.assertIsNone(new_datasets[0].Yvar)
+        self.assertTrue(torch.equal(new_datasets[0].X, X[:3]))
         self.assertTrue(
-            torch.equal(new_datasets[0].Y(), torch.cat([Y[:3] for Y in Ys], dim=-1))
+            torch.equal(new_datasets[0].Y, torch.cat([Y[:3] for Y in Ys], dim=-1))
         )
-        self.assertEqual(new_metric_names, ["y1_y2"])
+        self.assertEqual(new_datasets[0].outcome_names, metric_names)
 
         # test warning is issued if not block design and force=True (fixed)
         datasets = [
-            FixedNoiseDataset(X=X, Y=Y, Yvar=Yvar)
-            for X, Y, Yvar in zip((X, X2), Ys, Yvars)
+            SupervisedDataset(
+                X=X, Y=Y, Yvar=Yvar, feature_names=["x1", "x2"], outcome_names=[name]
+            )
+            for X, Y, Yvar, name in zip((X, X2), Ys, Yvars, metric_names)
         ]
         with warnings.catch_warnings(record=True) as ws:
-            new_datasets, new_metric_names = convert_to_block_design(
-                datasets=datasets, metric_names=metric_names, force=True
-            )
+            new_datasets = convert_to_block_design(datasets=datasets, force=True)
         self.assertTrue(any(issubclass(w.category, AxWarning) for w in ws))
         self.assertTrue(
             any(
-                "Forcing converion of data not complying to a block design"
+                "Forcing conversion of data not complying to a block design"
                 in str(w.message)
                 for w in ws
             )
         )
         self.assertEqual(len(new_datasets), 1)
-        self.assertIsInstance(new_datasets[0], FixedNoiseDataset)
-        self.assertTrue(torch.equal(new_datasets[0].X(), X[:3]))
+        self.assertIsNotNone(new_datasets[0].Yvar)
+        self.assertTrue(torch.equal(new_datasets[0].X, X[:3]))
         self.assertTrue(
-            torch.equal(new_datasets[0].Y(), torch.cat([Y[:3] for Y in Ys], dim=-1))
+            torch.equal(new_datasets[0].Y, torch.cat([Y[:3] for Y in Ys], dim=-1))
         )
         self.assertTrue(
             torch.equal(
-                new_datasets[0].Yvar(), torch.cat([Yvar[:3] for Yvar in Yvars], dim=-1)
+                none_throws(new_datasets[0].Yvar),
+                torch.cat([Yvar[:3] for Yvar in Yvars], dim=-1),
             )
         )
-        self.assertEqual(new_metric_names, ["y1_y2"])
+        self.assertEqual(new_datasets[0].outcome_names, metric_names)
 
-    def test_disable_one_to_many_transforms(self) -> None:
-        mm = MockModel(posterior=MockPosterior())
-        # No input transforms.
-        with disable_one_to_many_transforms(model=mm):
-            pass
-        # Error with Chained intf.
-        normalize = Normalize(d=2)
-        perturbation = InputPerturbation(perturbation_set=torch.rand(2, 2))
-        chained_tf = ChainedInputTransform(
-            normalize=normalize, perturbation=perturbation
+    def test_to_inequality_constraints(self) -> None:
+        A = torch.tensor([[0, 1, -2, 3], [0, 1, 0, 0]])
+        b = torch.tensor([[1], [2]])
+        ineq_constraints = none_throws(
+            _to_inequality_constraints(linear_constraints=(A, b))
         )
-        # pyre-ignore [16]
-        mm.input_transform = deepcopy(chained_tf)
-        with self.assertRaisesRegex(UnsupportedError, "ChainedInputTransforms"):
-            with disable_one_to_many_transforms(model=mm):
-                pass
-        # The transform is not modified.
+        self.assertEqual(len(ineq_constraints), 2)
+        self.assertTrue(torch.allclose(ineq_constraints[0][0], torch.tensor([1, 2, 3])))
         self.assertTrue(
-            checked_cast(InputTransform, mm.input_transform).equals(chained_tf)
+            torch.allclose(ineq_constraints[0][1], torch.tensor([-1, 2, -3]))
         )
-        # With one-to-many transform.
-        mm.input_transform = deepcopy(perturbation)
-        with disable_one_to_many_transforms(model=mm):
-            self.assertFalse(
-                checked_cast(InputTransform, mm.input_transform).transform_on_eval
-            )
-        self.assertTrue(
-            checked_cast(InputTransform, mm.input_transform).transform_on_eval
+        self.assertEqual(ineq_constraints[0][2], -1.0)
+        self.assertTrue(torch.allclose(ineq_constraints[1][0], torch.tensor([1])))
+        self.assertTrue(torch.allclose(ineq_constraints[1][1], torch.tensor([-1])))
+        self.assertEqual(ineq_constraints[1][2], -2.0)
+
+    def test_subset_state_dict(self) -> None:
+        m0 = SingleTaskGP(train_X=torch.rand(5, 2), train_Y=torch.rand(5, 1))
+        m1 = SingleTaskGP(train_X=torch.rand(5, 2), train_Y=torch.rand(5, 1))
+        model_list = ModelListGP(m0, m1)
+        model_list_state_dict = assert_is_instance(model_list.state_dict(), OrderedDict)
+        # Subset the model dict from model list and check that it is correct.
+        m0_state_dict = model_list.models[0].state_dict()
+        subsetted_m0_state_dict = subset_state_dict(
+            state_dict=model_list_state_dict, submodel_index=0
         )
-        self.assertTrue(
-            checked_cast(InputTransform, mm.input_transform).equals(perturbation)
-        )
-        # With ModelList.
-        mm_list = ModelList(mm, deepcopy(mm))
-        with disable_one_to_many_transforms(model=mm_list):
-            for mm in mm_list.models:
-                self.assertFalse(mm.input_transform.transform_on_eval)
-        for mm in mm_list.models:
-            self.assertTrue(mm.input_transform.transform_on_eval)
+        self.assertEqual(m0_state_dict.keys(), subsetted_m0_state_dict.keys())
+        for k in m0_state_dict:
+            self.assertTrue(torch.equal(m0_state_dict[k], subsetted_m0_state_dict[k]))
+        # Check that it can be loaded on the model.
+        m0.load_state_dict(subsetted_m0_state_dict)

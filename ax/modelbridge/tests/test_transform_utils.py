@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from unittest import mock
 
 import numpy as np
@@ -12,7 +14,7 @@ from ax.core.experiment import Experiment
 from ax.core.observation import Observation, ObservationData, ObservationFeatures
 from ax.core.parameter import ParameterType, RangeParameter
 from ax.core.search_space import SearchSpace
-from ax.modelbridge.base import ModelBridge
+from ax.modelbridge.base import Adapter
 from ax.modelbridge.transforms.utils import (
     ClosestLookupDict,
     derelativize_optimization_config_with_raw_status_quo,
@@ -65,7 +67,7 @@ class TransformUtilsTest(TestCase):
                 RangeParameter("y", ParameterType.FLOAT, 0, 20),
             ]
         )
-        modelbridge = ModelBridge(
+        modelbridge = Adapter(
             search_space=dummy_search_space,
             model=None,
             transforms=[],

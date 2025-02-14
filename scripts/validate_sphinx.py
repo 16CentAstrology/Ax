@@ -29,6 +29,8 @@ EXCLUDE_MODULES = {
 }
 
 
+# NOTE: Can't use set[str] here due to internal call site of this module
+# on an ancient (<py3.9) python version.
 def parse_rst(rst_filename: str) -> Set[str]:
     """Extract automodule directives from rst."""
     ret = set()
@@ -50,6 +52,8 @@ def validate_complete_sphinx(path_to_ax: str) -> None:
     * Every single non-package (i.e. py file) module should be included in rst file with
       `automodule::` directive. Sphinx will then automatically include all members from
        the module in the documentation.
+    * The files are located in the github/sphinx/source folder. If this is failing,
+      ensure your file/module is present in the correct location in that folder.
 
     Note: this function does not validate any documentation for the 'ax' module.
 
@@ -64,7 +68,7 @@ def validate_complete_sphinx(path_to_ax: str) -> None:
         for importer, modname, ispkg in pkgutil.walk_packages(
             path=[AX_LIBRARY_PATH], onerror=lambda x: None
         )
-        if modname not in {"fb", "version"}
+        if modname not in {"fb", "version", "__version__"}
     }
 
     # Load all rst files (these contain the documentation for Sphinx)
@@ -80,7 +84,10 @@ def validate_complete_sphinx(path_to_ax: str) -> None:
         }
 
     # Verify that all top-level modules have a corresponding rst
-    assert len(modules.difference(rsts)) == 0, "Not all modules have corresponding rst."
+    modules_without_rsts = modules.difference(rsts)
+    assert (
+        len(modules_without_rsts) == 0
+    ), f"Not all modules have corresponding rst: {modules_without_rsts}"
 
     # Track all modules that are not in docs (so can print all)
     modules_not_in_docs = []

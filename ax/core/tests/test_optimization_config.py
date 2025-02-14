@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from ax.core.metric import Metric
 from ax.core.objective import MultiObjective, Objective, ScalarizedObjective
 from ax.core.optimization_config import (
@@ -41,6 +43,7 @@ MOOC_STR = (
 
 class OptimizationConfigTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.metrics = {
             "m1": Metric(name="m1"),
             "m2": Metric(name="m2"),
@@ -81,7 +84,7 @@ class OptimizationConfigTest(TestCase):
             options={"n_w": 2},
         )
 
-    def testInit(self) -> None:
+    def test_Init(self) -> None:
         config1 = OptimizationConfig(
             objective=self.objective, outcome_constraints=self.outcome_constraints
         )
@@ -117,7 +120,7 @@ class OptimizationConfigTest(TestCase):
         self.assertEqual(str(config3), expected_str)
         self.assertIs(config3.risk_measure, self.single_output_risk_measure)
 
-    def testEq(self) -> None:
+    def test_Eq(self) -> None:
         config1 = OptimizationConfig(
             objective=self.objective,
             outcome_constraints=self.outcome_constraints,
@@ -139,7 +142,7 @@ class OptimizationConfigTest(TestCase):
         )
         self.assertNotEqual(config1, config3)
 
-    def testConstraintValidation(self) -> None:
+    def test_ConstraintValidation(self) -> None:
         # Can build OptimizationConfig with MultiObjective
         with self.assertRaises(ValueError):
             OptimizationConfig(objective=self.multi_objective)
@@ -217,7 +220,7 @@ class OptimizationConfigTest(TestCase):
             config.outcome_constraints, [self.outcome_constraint, opposing_constraint]
         )
 
-    def testClone(self) -> None:
+    def test_Clone(self) -> None:
         config1 = OptimizationConfig(
             objective=self.objective,
             outcome_constraints=self.outcome_constraints,
@@ -225,7 +228,7 @@ class OptimizationConfigTest(TestCase):
         )
         self.assertEqual(config1, config1.clone())
 
-    def testCloneWithArgs(self) -> None:
+    def test_CloneWithArgs(self) -> None:
         config1 = OptimizationConfig(
             objective=self.objective,
             outcome_constraints=self.outcome_constraints,
@@ -265,6 +268,7 @@ class OptimizationConfigTest(TestCase):
 
 class MultiObjectiveOptimizationConfigTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.metrics = {
             "m1": Metric(name="m1", lower_is_better=True),
             "m2": Metric(name="m2", lower_is_better=False),
@@ -275,7 +279,7 @@ class MultiObjectiveOptimizationConfigTest(TestCase):
             "o2": Objective(metric=self.metrics["m2"], minimize=False),
             "o3": Objective(metric=self.metrics["m3"], minimize=False),
         }
-        self.objective = Objective(metric=self.metrics["m1"], minimize=False)
+        self.objective = Objective(metric=self.metrics["m1"], minimize=True)
         self.multi_objective = MultiObjective(
             objectives=[self.objectives["o1"], self.objectives["o2"]]
         )
@@ -283,7 +287,9 @@ class MultiObjectiveOptimizationConfigTest(TestCase):
             objectives=[self.objectives["o2"]]
         )
         self.scalarized_objective = ScalarizedObjective(
-            metrics=list(self.metrics.values()), weights=[1.0, 1.0, 1.0]
+            metrics=list(self.metrics.values()),
+            weights=[-1.0, 1.0, 1.0],
+            minimize=False,
         )
         self.outcome_constraint = OutcomeConstraint(
             metric=self.metrics["m3"], op=ComparisonOp.GEQ, bound=-0.25
@@ -323,12 +329,17 @@ class MultiObjectiveOptimizationConfigTest(TestCase):
             options={"n_w": 2},
         )
 
-    def testInit(self) -> None:
+    def test_Init(self) -> None:
         config1 = MultiObjectiveOptimizationConfig(
             objective=self.multi_objective, outcome_constraints=self.outcome_constraints
         )
         self.assertEqual(str(config1), MOOC_STR)
-        with self.assertRaises(TypeError):
+        with self.assertRaisesRegex(
+            TypeError,
+            "`MultiObjectiveOptimizationConfig` requires an objective of type "
+            "`MultiObjective` or `ScalarizedObjective`.",
+        ):
+            # pyre-fixme [8]: Incompatible attribute type
             config1.objective = self.objective  # Wrong objective type
         # updating constraints is fine.
         config1.outcome_constraints = [self.outcome_constraint]
@@ -402,7 +413,7 @@ class MultiObjectiveOptimizationConfigTest(TestCase):
         )
         self.assertIs(config7.risk_measure, self.single_output_risk_measure)
 
-    def testEq(self) -> None:
+    def test_Eq(self) -> None:
         config1 = MultiObjectiveOptimizationConfig(
             objective=self.multi_objective, outcome_constraints=self.outcome_constraints
         )
@@ -420,9 +431,14 @@ class MultiObjectiveOptimizationConfigTest(TestCase):
         )
         self.assertNotEqual(config1, config3)
 
-    def testConstraintValidation(self) -> None:
+    def test_ConstraintValidation(self) -> None:
         # Cannot build with non-MultiObjective
-        with self.assertRaises(TypeError):
+        with self.assertRaisesRegex(
+            TypeError,
+            "`MultiObjectiveOptimizationConfig` requires an objective of type "
+            "`MultiObjective` or `ScalarizedObjective`.",
+        ):
+            # pyre-fixme [6]: Incompatible parameter type
             MultiObjectiveOptimizationConfig(objective=self.objective)
 
         # Using an outcome constraint for an objective should raise
@@ -493,7 +509,7 @@ class MultiObjectiveOptimizationConfigTest(TestCase):
             config.outcome_constraints, [self.outcome_constraint, opposing_constraint]
         )
 
-    def testClone(self) -> None:
+    def test_Clone(self) -> None:
         config1 = MultiObjectiveOptimizationConfig(
             objective=self.multi_objective, outcome_constraints=self.outcome_constraints
         )
@@ -505,7 +521,7 @@ class MultiObjectiveOptimizationConfigTest(TestCase):
         )
         self.assertEqual(config2, config2.clone())
 
-    def testCloneWithArgs(self) -> None:
+    def test_CloneWithArgs(self) -> None:
         config1 = MultiObjectiveOptimizationConfig(
             objective=self.multi_objective,
             objective_thresholds=self.objective_thresholds,

@@ -4,24 +4,48 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 import itertools
 import warnings
-from collections import defaultdict
-from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+from collections.abc import Callable, Mapping, Sequence
+from typing import Protocol, TypeVar, Union
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from ax.core.search_space import SearchSpaceDigest
-from ax.core.types import TParamCounter
-from ax.exceptions.core import SearchSpaceExhausted
-from ax.models.torch_base import TorchModel
+from ax.exceptions.core import SearchSpaceExhausted, UnsupportedError
 from ax.models.types import TConfig
 from botorch.acquisition.risk_measures import RiskMeasureMCObjective
+from botorch.exceptions.warnings import OptimizationWarning
+from pyre_extensions import assert_is_instance
+from torch import Tensor
 
 
+# pyre-fixme[24]: Generic type `np.ndarray` expects 2 type parameters.
 Tensoray = Union[torch.Tensor, np.ndarray]
+TTensoray = TypeVar("TTensoray", bound=Tensoray)
+
+
+class TorchGeneratorLike(Protocol):
+    """A protocol that stands in for ``TorchModel`` like objects that
+    have a ``predict`` method.
+    """
+
+    def predict(self, X: Tensor) -> tuple[Tensor, Tensor]:
+        """Predicts outcomes given an input tensor.
+
+        Args:
+            X: A ``n x d`` tensor of input parameters.
+
+        Returns:
+            Tensor: The predicted posterior mean as an ``n x o``-dim tensor.
+            Tensor: The predicted posterior covariance as a ``n x o x o``-dim tensor.
+        """
+        ...
 
 
 DEFAULT_MAX_RS_DRAWS = 10000
@@ -29,35 +53,55 @@ DEFAULT_MAX_RS_DRAWS = 10000
 
 def rejection_sample(
     gen_unconstrained: Callable[
-        [int, int, np.ndarray, Optional[Dict[int, float]]], np.ndarray
+        [int, int, npt.NDArray, dict[int, float] | None], npt.NDArray
     ],
     n: int,
     d: int,
-    tunable_feature_indices: np.ndarray,
-    linear_constraints: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+    tunable_feature_indices: npt.NDArray,
+    linear_constraints: tuple[npt.NDArray, npt.NDArray] | None = None,
     deduplicate: bool = False,
-    max_draws: Optional[int] = None,
-    fixed_features: Optional[Dict[int, float]] = None,
-    rounding_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
-    existing_points: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, int]:
-    """Rejection sample in parameter space.
+    max_draws: int | None = None,
+    fixed_features: dict[int, float] | None = None,
+    rounding_func: Callable[[npt.NDArray], npt.NDArray] | None = None,
+    existing_points: npt.NDArray | None = None,
+) -> tuple[npt.NDArray, int]:
+    """Rejection sample in parameter space. Parameter space is typically
+    [0, 1] for all tunable parameters.
 
-    Models must implement a `gen_unconstrained` method in order to support
+    Generators must implement a `gen_unconstrained` method in order to support
     rejection sampling via this utility.
+
+    Args:
+        gen_unconstrained: A callable that generates unconstrained points in
+            the parameter space. This is typically the `_gen_unconstrained` method
+            of a `RandomGenerator`.
+        n: Number of samples to generate.
+        d: Dimensionality of the parameter space.
+        tunable_feature_indices: Indices of the tunable features in the
+            parameter space.
+        linear_constraints: A tuple of (A, b). For k linear constraints on
+            d-dimensional x, A is (k x d) and b is (k x 1) such that
+            A x <= b.
+        deduplicate: If true, reject points that are duplicates of previously
+            generated points. The points are deduplicated after applying the
+            rounding function.
+        max_draws: Maximum number of attemped draws before giving up.
+        fixed_features: A map {feature_index: value} for features that
+            should be fixed to a particular value during generation.
+        rounding_func: A function that rounds an optimization result
+            appropriately (e.g., according to `round-trip` transformations).
+        existing_points: A set of previously generated points to use
+            for deduplication. These should be provided in the parameter
+            space model operates in.
     """
     # We need to perform the round trip transformation on our generated point
     # in order to deduplicate in the original search space.
     # The transformation is applied above.
     if deduplicate and rounding_func is None:
-        raise ValueError(
-            "Rounding function must be provided for deduplication."  # pragma: no cover
-        )
+        raise ValueError("Rounding function must be provided for deduplication.")
 
-    failed_constraint_dict: TParamCounter = defaultdict(lambda: 0)
     # Rejection sample with parameter constraints.
     points = np.zeros((n, d))
-
     attempted_draws = 0
     successful_draws = 0
     if max_draws is None:
@@ -73,37 +117,36 @@ def rejection_sample(
             fixed_features=fixed_features,
         )[0]
 
-        # Note: this implementation may not be performant, if the feasible volume
-        # is small, since applying the rounding_func is relatively expensive.
-        # If sampling in spaces with low feasible volume is slow, this function
-        # could be applied after checking the linear constraints.
-        if rounding_func is not None:
-            point = rounding_func(point)
-
         # Check parameter constraints, always in raw transformed space.
         if linear_constraints is not None:
-            all_constraints_satisfied, violators = check_param_constraints(
+            all_constraints_satisfied, _ = check_param_constraints(
                 linear_constraints=linear_constraints, point=point
             )
-            for violator in violators:
-                failed_constraint_dict[violator] += 1
         else:
             all_constraints_satisfied = True
-            violators = np.array([])
 
-        # Deduplicate: don't add the same point twice.
-        duplicate = False
-        if deduplicate:
-            if existing_points is not None:
-                prev_points = np.vstack([points[:successful_draws, :], existing_points])
-            else:
-                prev_points = points[:successful_draws, :]
-            duplicate = check_duplicate(point=point, points=prev_points)
+        if all_constraints_satisfied:
+            # Apply the rounding function if the point satisfies the linear constraints.
+            if rounding_func is not None:
+                # NOTE: This could still fail rounding with a logger warning. But this
+                # should be rare since the point is feasible in the continuous space.
+                point = rounding_func(point)
 
-        # Add point if valid.
-        if all_constraints_satisfied and not duplicate:
-            points[successful_draws] = point
-            successful_draws += 1
+            # Deduplicate: don't add the same point twice.
+            duplicate = False
+            if deduplicate:
+                if existing_points is not None:
+                    prev_points = np.vstack(
+                        [points[:successful_draws, :], existing_points]
+                    )
+                else:
+                    prev_points = points[:successful_draws, :]
+                duplicate = check_duplicate(point=point, points=prev_points)
+
+            # Add point if valid.
+            if not duplicate:
+                points[successful_draws] = point
+                successful_draws += 1
         attempted_draws += 1
 
     if successful_draws < n:
@@ -117,7 +160,7 @@ def rejection_sample(
         return (points, attempted_draws)
 
 
-def check_duplicate(point: np.ndarray, points: np.ndarray) -> bool:
+def check_duplicate(point: npt.NDArray, points: npt.NDArray) -> bool:
     """Check if a point exists in another array.
 
     Args:
@@ -134,11 +177,11 @@ def check_duplicate(point: np.ndarray, points: np.ndarray) -> bool:
 
 
 def add_fixed_features(
-    tunable_points: np.ndarray,
+    tunable_points: npt.NDArray,
     d: int,
-    fixed_features: Optional[Dict[int, float]],
-    tunable_feature_indices: np.ndarray,
-) -> np.ndarray:
+    fixed_features: dict[int, float] | None,
+    tunable_feature_indices: npt.NDArray,
+) -> npt.NDArray:
     """Add fixed features to points in tunable space.
 
     Args:
@@ -162,8 +205,9 @@ def add_fixed_features(
 
 
 def check_param_constraints(
-    linear_constraints: Tuple[np.ndarray, np.ndarray], point: np.ndarray
-) -> Tuple[bool, np.ndarray]:
+    linear_constraints: tuple[npt.NDArray, npt.NDArray],
+    point: npt.NDArray,
+) -> tuple[bool, npt.NDArray]:
     """Check if a point satisfies parameter constraints.
 
     Args:
@@ -188,8 +232,9 @@ def check_param_constraints(
 
 
 def tunable_feature_indices(
-    bounds: List[Tuple[float, float]], fixed_features: Optional[Dict[int, float]] = None
-) -> np.ndarray:
+    bounds: list[tuple[float, float]],
+    fixed_features: dict[int, float] | None = None,
+) -> npt.NDArray:
     """Get the feature indices of tunable features.
 
     Args:
@@ -206,7 +251,8 @@ def tunable_feature_indices(
 
 
 def validate_bounds(
-    bounds: List[Tuple[float, float]], fixed_feature_indices: np.ndarray
+    bounds: Sequence[tuple[float, float]],
+    fixed_feature_indices: npt.NDArray,
 ) -> None:
     """Ensure the requested space is [0,1]^d.
 
@@ -223,21 +269,21 @@ def validate_bounds(
         if bound[0] != 0 or bound[1] != 1:
             raise ValueError(
                 "This generator operates on [0,1]^d. Please make use "
-                "of the UnitX transform in the ModelBridge, and ensure "
+                "of the UnitX transform in the Adapter, and ensure "
                 "task features are fixed."
             )
 
 
 def best_observed_point(
-    model: TorchModel,
-    bounds: List[Tuple[float, float]],
-    objective_weights: Optional[Tensoray],
-    outcome_constraints: Optional[Tuple[Tensoray, Tensoray]] = None,
-    linear_constraints: Optional[Tuple[Tensoray, Tensoray]] = None,
-    fixed_features: Optional[Dict[int, float]] = None,
-    risk_measure: Optional[RiskMeasureMCObjective] = None,
-    options: Optional[TConfig] = None,
-) -> Optional[Tensoray]:
+    model: TorchGeneratorLike,
+    bounds: Sequence[tuple[float, float]],
+    objective_weights: TTensoray | None,
+    outcome_constraints: tuple[TTensoray, TTensoray] | None = None,
+    linear_constraints: tuple[TTensoray, TTensoray] | None = None,
+    fixed_features: dict[int, float] | None = None,
+    risk_measure: RiskMeasureMCObjective | None = None,
+    options: TConfig | None = None,
+) -> TTensoray | None:
     """Select the best point that has been observed.
 
     Implements two approaches to selecting the best point.
@@ -269,7 +315,7 @@ def best_observed_point(
       probability of feasibility (defaults 10k).
 
     Args:
-        model: Numpy or Torch model.
+        model: A Torch model or Surrogate.
         bounds: A list of (lower, upper) tuples for each feature.
         objective_weights: The objective is to maximize a weighted sum of
             the columns of f(x). These are the weights.
@@ -304,16 +350,16 @@ def best_observed_point(
 
 
 def best_in_sample_point(
-    Xs: Union[List[torch.Tensor], List[np.ndarray]],
-    model: TorchModel,
-    bounds: List[Tuple[float, float]],
-    objective_weights: Optional[Tensoray],
-    outcome_constraints: Optional[Tuple[Tensoray, Tensoray]] = None,
-    linear_constraints: Optional[Tuple[Tensoray, Tensoray]] = None,
-    fixed_features: Optional[Dict[int, float]] = None,
-    risk_measure: Optional[RiskMeasureMCObjective] = None,
-    options: Optional[TConfig] = None,
-) -> Optional[Tuple[Tensoray, float]]:
+    Xs: Sequence[TTensoray],
+    model: TorchGeneratorLike,
+    bounds: Sequence[tuple[float, float]],
+    objective_weights: TTensoray | None,
+    outcome_constraints: tuple[TTensoray, TTensoray] | None = None,
+    linear_constraints: tuple[TTensoray, TTensoray] | None = None,
+    fixed_features: dict[int, float] | None = None,
+    risk_measure: RiskMeasureMCObjective | None = None,
+    options: TConfig | None = None,
+) -> tuple[TTensoray, float] | None:
     """Select the best point that has been observed.
 
     Implements two approaches to selecting the best point.
@@ -346,7 +392,7 @@ def best_in_sample_point(
 
     Args:
         Xs: Training data for the points, among which to select the best.
-        model: Numpy or Torch model.
+        model: A Torch model or Surrogate.
         bounds: A list of (lower, upper) tuples for each feature.
         objective_weights: The objective is to maximize a weighted sum of
             the columns of f(x). These are the weights.
@@ -370,18 +416,18 @@ def best_in_sample_point(
         # TODO[T131759268]: We need to apply the risk measure. Instead of doing obj_w @,
         # we could use `get_botorch_objective_and_transform` to get the objective
         # then apply it, though we also need to decide how to deal with constraints.
-        raise NotImplementedError  # pragma: no cover
+        raise NotImplementedError
     # Parse options
     if options is None:
         options = {}
     method: str = options.get("best_point_method", "max_utility")
-    B: Optional[float] = options.get("utility_baseline", None)
+    B: float | None = options.get("utility_baseline", None)
     threshold: float = options.get("probability_threshold", 0.95)
     nsamp: int = options.get("feasibility_mc_samples", 10000)
     # Get points observed for all objective and constraint outcomes
     if objective_weights is None:
-        return None  # pragma: no cover
-    objective_weights_np = as_array(objective_weights)
+        return None
+    objective_weights_np = assert_is_instance(as_array(objective_weights), np.ndarray)
     X_obs = get_observed(
         Xs=Xs,
         objective_weights=objective_weights,
@@ -399,38 +445,46 @@ def best_in_sample_point(
         return None
     # Predict objective and P(feas) at these points for Torch models.
     if isinstance(Xs[0], torch.Tensor):
+        # pyre-fixme[16]: Item `ndarray` of `Union[ndarray[typing.Any, typing.Any],
+        #  Tensor]` has no attribute `detach`.
         X_obs = X_obs.detach().clone()
+    # (n_feasible x n_outcomes), (n_feasible x n_outcomes x n_outcomes)
     f, cov = as_array(model.predict(X_obs))
-    obj = objective_weights_np @ f.transpose()  # pyre-ignore
+    # (n_outcomes,) x (n_outcomes, n_feasible) => (n_feasible,)
+    obj = objective_weights_np @ f.transpose()
     pfeas = np.ones_like(obj)
     if outcome_constraints is not None:
-        A, b = as_array(outcome_constraints)  # (m x j) and (m x 1)
+        # (n_constraints x n_outcomes) and (n_constraints x 1)
+        A, b = as_array(outcome_constraints)
         # Use Monte Carlo to compute pfeas, to properly handle covariance
         # across outcomes.
         for i, _ in enumerate(X_obs):
+            # nsamp x n_outcomes
             z = np.random.multivariate_normal(
                 mean=f[i, :], cov=cov[i, :, :], size=nsamp
-            )  # (nsamp x j)
+            )
+            # (n_constraints x n_outcomes) @ (n_outcomes x nsamp)
             pfeas[i] = (A @ z.transpose() <= b).all(axis=0).mean()
     # Identify best point
     if method == "feasible_threshold":
         utility = obj
-        utility[pfeas < threshold] = -np.Inf
+        utility[pfeas < threshold] = -np.inf
     elif method == "max_utility":
         if B is None:
             B = obj.min()
         utility = (obj - B) * pfeas
-    # pyre-fixme[61]: `utility` may not be initialized here.
+    else:  # pragma: no cover
+        raise UnsupportedError(f"Unknown best point method {method}.")
     i = np.argmax(utility)
-    if utility[i] == -np.Inf:
+    if utility[i] == -np.inf:
         return None
     else:
         return X_obs[i, :], utility[i]
 
 
 def as_array(
-    x: Union[Tensoray, Tuple[Tensoray, ...]]
-) -> Union[np.ndarray, Tuple[np.ndarray, ...]]:
+    x: Tensoray | tuple[Tensoray, ...],
+) -> npt.NDArray | tuple[npt.NDArray, ...]:
     """Convert every item in a tuple of tensors/arrays into an array.
 
     Args:
@@ -446,16 +500,14 @@ def as_array(
     elif torch.is_tensor(x):
         return x.detach().cpu().double().numpy()
     else:
-        raise ValueError(
-            "Input to as_array must be numpy array or torch tensor"
-        )  # pragma: no cover
+        raise ValueError("Input to as_array must be numpy array or torch tensor")
 
 
 def get_observed(
-    Xs: Union[List[torch.Tensor], List[np.ndarray]],
-    objective_weights: Tensoray,
-    outcome_constraints: Optional[Tuple[Tensoray, Tensoray]] = None,
-) -> Tensoray:
+    Xs: Sequence[TTensoray],
+    objective_weights: TTensoray,
+    outcome_constraints: tuple[TTensoray, TTensoray] | None = None,
+) -> TTensoray:
     """Filter points to those that are observed for objective outcomes and outcomes
     that show up in outcome_constraints (if there are any).
 
@@ -472,7 +524,7 @@ def get_observed(
         Points observed for all objective outcomes and outcome constraints.
     """
     objective_weights_np = as_array(objective_weights)
-    used_outcomes: Set[int] = set(np.where(objective_weights_np != 0)[0])
+    used_outcomes: set[int] = set(np.where(objective_weights_np != 0)[0])
     if len(used_outcomes) == 0:
         raise ValueError("At least one objective weight must be non-zero")
     if outcome_constraints is not None:
@@ -486,22 +538,24 @@ def get_observed(
             {tuple(float(x_i) for x_i in x) for x in Xs[idx]}
         )
     if isinstance(Xs[0], np.ndarray):
-        # pyre-fixme[6]: For 2nd param expected `Union[None, Dict[str, Tuple[typing.A...
+        # pyre-fixme[7]: This function only returns a Numpy array when Xs
+        # contains all Numpy arrays, but Pyre doesn't understand
         return np.array(list(X_obs_set), dtype=Xs[0].dtype)  # (n x d)
-    if isinstance(Xs[0], torch.Tensor):
-        # pyre-fixme[7]: Expected `Union[np.ndarray, torch.Tensor]` but got implicit
-        #  return value of `None`.
-        # pyre-fixme[6]: For 3rd param expected `Optional[_C.dtype]` but got
-        #  `Union[np.dtype, _C.dtype]`.
-        return torch.tensor(list(X_obs_set), device=Xs[0].device, dtype=Xs[0].dtype)
+    # pyre-fixme[7]: This function only returns a tensor when Xs
+    # contains all tensors, but Pyre doesn't understand`.
+    return torch.tensor(
+        list(X_obs_set),
+        device=assert_is_instance(Xs[0], torch.Tensor).device,
+        dtype=Xs[0].dtype,
+    )
 
 
 def filter_constraints_and_fixed_features(
-    X: Tensoray,
-    bounds: List[Tuple[float, float]],
-    linear_constraints: Optional[Tuple[Tensoray, Tensoray]] = None,
-    fixed_features: Optional[Dict[int, float]] = None,
-) -> Tensoray:
+    X: TTensoray,
+    bounds: Sequence[tuple[float, float]],
+    linear_constraints: tuple[TTensoray, TTensoray] | None = None,
+    fixed_features: dict[int, float] | None = None,
+) -> TTensoray:
     """Filter points to those that satisfy bounds, linear_constraints, and
     fixed_features.
 
@@ -519,9 +573,9 @@ def filter_constraints_and_fixed_features(
     """
     if len(X) == 0:  # if there are no points, nothing to filter
         return X
-    X_np = X
-    if isinstance(X, torch.Tensor):
-        X_np = X.cpu().numpy()
+    # pyre-ignore: Undefined attribute [16]: `np.ndarray` has no attribute
+    # `cpu`.
+    X_np = X.cpu().numpy() if isinstance(X, torch.Tensor) else X
     feas = np.ones(X_np.shape[0], dtype=bool)  # (n)
     for i, b in enumerate(bounds):
         feas &= (X_np[:, i] >= b[0]) & (X_np[:, i] <= b[1])
@@ -534,14 +588,13 @@ def filter_constraints_and_fixed_features(
     X_feas = X_np[feas, :]
     if isinstance(X, torch.Tensor):
         return torch.from_numpy(X_feas).to(device=X.device, dtype=X.dtype)
-    else:
-        return X_feas
+    return X_feas
 
 
 def mk_discrete_choices(
     ssd: SearchSpaceDigest,
-    fixed_features: Optional[Dict[int, float]] = None,
-) -> Dict[int, List[Union[int, float]]]:
+    fixed_features: Mapping[int, float] | None = None,
+) -> Mapping[int, Sequence[float]]:
     discrete_choices = ssd.discrete_choices
     # Add in fixed features.
     if fixed_features is not None:
@@ -554,16 +607,37 @@ def mk_discrete_choices(
 
 
 def enumerate_discrete_combinations(
-    discrete_choices: Dict[int, List[Union[int, float]]],
-) -> List[Dict[int, Union[float, int]]]:
+    discrete_choices: Mapping[int, Sequence[float]],
+) -> list[dict[int, float]]:
     n_combos = np.prod([len(v) for v in discrete_choices.values()])
     if n_combos > 50:
         warnings.warn(
             f"Enumerating {n_combos} combinations of discrete parameter values "
-            "while optimizing over a mixed search space. This can be very slow."
+            "while optimizing over a mixed search space. This can be very slow.",
+            OptimizationWarning,
+            stacklevel=2,
         )
     fixed_features_list = [
         dict(zip(discrete_choices.keys(), c))
         for c in itertools.product(*discrete_choices.values())
     ]
     return fixed_features_list
+
+
+def all_ordinal_features_are_integer_valued(
+    ssd: SearchSpaceDigest,
+) -> bool:
+    """Check if all ordinal features are integer-valued.
+
+    Args:
+        ssd: A SearchSpaceDigest.
+
+    Returns:
+        True if all ordinal features are integer-valued, False otherwise.
+    """
+    for feature_idx in ssd.ordinal_features:
+        choices = ssd.discrete_choices[feature_idx]
+        int_choices = [int(c) for c in choices]
+        if choices != int_choices:
+            return False
+    return True

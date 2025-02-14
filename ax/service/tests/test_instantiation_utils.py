@@ -4,12 +4,23 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+from typing import Any
+
 from ax.core.metric import Metric
-from ax.core.parameter import FixedParameter, ParameterType, RangeParameter
+from ax.core.optimization_config import MultiObjectiveOptimizationConfig
+from ax.core.parameter import (
+    ChoiceParameter,
+    FixedParameter,
+    ParameterType,
+    RangeParameter,
+)
 from ax.core.search_space import HierarchicalSearchSpace
-from ax.exceptions.core import UnsupportedError, UserInputError
+from ax.runners.synthetic import SyntheticRunner
 from ax.service.utils.instantiation import InstantiationBase
 from ax.utils.common.testutils import TestCase
+from pyre_extensions import assert_is_instance
 
 
 class TestInstantiationtUtils(TestCase):
@@ -22,13 +33,37 @@ class TestInstantiationtUtils(TestCase):
             #  Type[int], Type[str]]` but got `Type[list]`.
             InstantiationBase._get_parameter_type(list)
 
+    def test_make_search_space(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot contain spaces"):
+            InstantiationBase.make_search_space(
+                parameters=[
+                    {
+                        "name": "x space 1",
+                        "type": "range",
+                        "bounds": [0.0, 1.0],
+                    }
+                ],
+                parameter_constraints=None,
+            )
+
     def test_constraint_from_str(self) -> None:
         with self.assertRaisesRegex(ValueError, "Bound for the constraint"):
             InstantiationBase.constraint_from_str(
                 "x1 + x2 <= not_numerical_bound",
-                # pyre-fixme[6]: For 2nd param expected `Dict[str, Parameter]` but
-                #  got `Dict[str, None]`.
-                {"x1": None, "x2": None},
+                {
+                    "x1": RangeParameter(
+                        name="x1",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=2.0,
+                    ),
+                    "x2": RangeParameter(
+                        name="x2",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=2.0,
+                    ),
+                },
             )
         with self.assertRaisesRegex(ValueError, "Outcome constraint bound"):
             InstantiationBase.outcome_constraint_from_str("m1 <= not_numerical_bound")
@@ -47,6 +82,9 @@ class TestInstantiationtUtils(TestCase):
             },
         )
 
+        with self.assertRaisesRegex(AssertionError, "Outcome constraint 'm1"):
+            InstantiationBase.outcome_constraint_from_str("m1 == 2*m2")
+
         self.assertEqual(three_val_constaint.bound, 3.0)
         with self.assertRaisesRegex(ValueError, "Parameter constraint should"):
             InstantiationBase.constraint_from_str(
@@ -62,6 +100,32 @@ class TestInstantiationtUtils(TestCase):
                 #  got `Dict[str, None]`.
                 {"x1": None, "x2": None, "x3": None},
             )
+        one_val_constraint = InstantiationBase.constraint_from_str(
+            "x1 <= 0",
+            {
+                "x1": RangeParameter(
+                    name="x1", parameter_type=ParameterType.FLOAT, lower=0.1, upper=2.0
+                ),
+                "x2": RangeParameter(
+                    name="x2", parameter_type=ParameterType.FLOAT, lower=0.1, upper=2.0
+                ),
+            },
+        )
+        self.assertEqual(one_val_constraint.bound, 0.0)
+        self.assertEqual(one_val_constraint.constraint_dict, {"x1": 1.0})
+        one_val_constraint = InstantiationBase.constraint_from_str(
+            "-0.5*x1 >= -0.1",
+            {
+                "x1": RangeParameter(
+                    name="x1", parameter_type=ParameterType.FLOAT, lower=0.1, upper=2.0
+                ),
+                "x2": RangeParameter(
+                    name="x2", parameter_type=ParameterType.FLOAT, lower=0.1, upper=2.0
+                ),
+            },
+        )
+        self.assertEqual(one_val_constraint.bound, 0.1)
+        self.assertEqual(one_val_constraint.constraint_dict, {"x1": 0.5})
         three_val_constaint2 = InstantiationBase.constraint_from_str(
             "-x1 + 2.1*x2 - 4*x3 <= 3",
             {
@@ -84,42 +148,116 @@ class TestInstantiationtUtils(TestCase):
         with self.assertRaisesRegex(ValueError, "Multiplier should be float"):
             InstantiationBase.constraint_from_str(
                 "x1 - e*x2 + x3 <= 3",
-                # pyre-fixme[6]: For 2nd param expected `Dict[str, Parameter]` but
-                #  got `Dict[str, None]`.
-                {"x1": None, "x2": None, "x3": None},
+                {
+                    "x1": RangeParameter(
+                        name="x1",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=4.0,
+                    ),
+                    "x2": RangeParameter(
+                        name="x2",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=4.0,
+                    ),
+                    "x3": RangeParameter(
+                        name="x3",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=4.0,
+                    ),
+                },
             )
         with self.assertRaisesRegex(ValueError, "A linear constraint should be"):
             InstantiationBase.constraint_from_str(
                 "x1 - 2 *x2 + 3 *x3 <= 3",
-                # pyre-fixme[6]: For 2nd param expected `Dict[str, Parameter]` but
-                #  got `Dict[str, None]`.
-                {"x1": None, "x2": None, "x3": None},
+                {
+                    "x1": RangeParameter(
+                        name="x1",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=4.0,
+                    ),
+                    "x2": RangeParameter(
+                        name="x2",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=4.0,
+                    ),
+                    "x3": RangeParameter(
+                        name="x3",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=4.0,
+                    ),
+                },
             )
         with self.assertRaisesRegex(ValueError, "A linear constraint should be"):
             InstantiationBase.constraint_from_str(
                 "x1 - 2* x2 + 3* x3 <= 3",
-                # pyre-fixme[6]: For 2nd param expected `Dict[str, Parameter]` but
-                #  got `Dict[str, None]`.
-                {"x1": None, "x2": None, "x3": None},
+                {
+                    "x1": RangeParameter(
+                        name="x1",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=4.0,
+                    ),
+                    "x2": RangeParameter(
+                        name="x2",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=4.0,
+                    ),
+                    "x3": RangeParameter(
+                        name="x3",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=4.0,
+                    ),
+                },
             )
         with self.assertRaisesRegex(ValueError, "A linear constraint should be"):
             InstantiationBase.constraint_from_str(
                 "x1 - 2 * x2 + 3*x3 <= 3",
-                # pyre-fixme[6]: For 2nd param expected `Dict[str, Parameter]` but
-                #  got `Dict[str, None]`.
-                {"x1": None, "x2": None, "x3": None},
+                {
+                    "x1": RangeParameter(
+                        name="x1",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=4.0,
+                    ),
+                    "x2": RangeParameter(
+                        name="x2",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=4.0,
+                    ),
+                    "x3": RangeParameter(
+                        name="x3",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=4.0,
+                    ),
+                },
             )
 
-    def test_objective_validation(self) -> None:
-        with self.assertRaisesRegex(UnsupportedError, "Ambiguous objective definition"):
-            InstantiationBase.make_experiment(
-                # pyre-fixme[6]: For 1st param expected `List[Dict[str, Union[None,
-                #  Dict[str, List[str]], List[Union[None, bool, float, int, str]],
-                #  bool, float, int, str]]]` but got `Dict[str, Union[List[int],
-                #  str]]`.
-                parameters={"name": "x", "type": "range", "bounds": [0, 1]},
-                objective_name="branin",
-                objectives={"branin": "minimize", "currin": "maximize"},
+        with self.assertRaisesRegex(
+            ValueError, "Parameter constraints not supported for ChoiceParameter"
+        ):
+            InstantiationBase.constraint_from_str(
+                "x1 + x2 <= 3",
+                {
+                    "x1": RangeParameter(
+                        name="x1",
+                        parameter_type=ParameterType.FLOAT,
+                        lower=0.1,
+                        upper=2.0,
+                    ),
+                    "x2": ChoiceParameter(
+                        name="x2", parameter_type=ParameterType.FLOAT, values=[0, 1, 2]
+                    ),
+                },
             )
 
     def test_add_tracking_metrics(self) -> None:
@@ -142,6 +280,10 @@ class TestInstantiationtUtils(TestCase):
     def test_make_objectives(self) -> None:
         with self.assertRaisesRegex(ValueError, "specify 'minimize' or 'maximize'"):
             InstantiationBase.make_objectives({"branin": "unknown"})
+
+        with self.assertRaisesRegex(ValueError, "cannot contain spaces"):
+            InstantiationBase.make_objectives({"branin space": "maximize"})
+
         objectives = InstantiationBase.make_objectives(
             {"branin": "minimize", "currin": "maximize"}
         )
@@ -162,14 +304,22 @@ class TestInstantiationtUtils(TestCase):
                     status_quo_defined=False,
                 )
 
-        with self.subTest("MOO missing objective thresholds"):
-            with self.assertRaises(UserInputError):
-                multi_optimization_config = InstantiationBase.make_optimization_config(
-                    objectives,
-                    objective_thresholds=objective_thresholds[:1],
-                    outcome_constraints=[],
-                    status_quo_defined=False,
-                )
+        with self.subTest("MOO with partial objective thresholds"):
+            multi_optimization_config = InstantiationBase.make_optimization_config(
+                objectives,
+                objective_thresholds=objective_thresholds[:1],
+                outcome_constraints=[],
+                status_quo_defined=False,
+            )
+            self.assertEqual(len(multi_optimization_config.objective.metrics), 2)
+            self.assertEqual(
+                len(
+                    assert_is_instance(
+                        multi_optimization_config, MultiObjectiveOptimizationConfig
+                    ).objective_thresholds
+                ),
+                1,
+            )
 
         with self.subTest("MOO with all objective threshold"):
             multi_optimization_config = InstantiationBase.make_optimization_config(
@@ -179,9 +329,14 @@ class TestInstantiationtUtils(TestCase):
                 status_quo_defined=False,
             )
             self.assertEqual(len(multi_optimization_config.objective.metrics), 2)
-            # pyre-fixme[16]: `OptimizationConfig` has no attribute
-            #  `objective_thresholds`.
-            self.assertEqual(len(multi_optimization_config.objective_thresholds), 2)
+            self.assertEqual(
+                len(
+                    assert_is_instance(
+                        multi_optimization_config, MultiObjectiveOptimizationConfig
+                    ).objective_thresholds
+                ),
+                2,
+            )
 
         with self.subTest(
             "Single-objective optimizations without objective thresholds"
@@ -195,18 +350,53 @@ class TestInstantiationtUtils(TestCase):
             self.assertEqual(single_optimization_config.objective.metric.name, "branin")
 
     def test_single_valued_choice_to_fixed_param_conversion(self) -> None:
-        representation = {
-            "name": "test",
-            "type": "choice",
-            "values": [1.0],
-        }
-        # pyre-fixme[6]: For 1st param expected `Dict[str, Union[None, Dict[str,
-        #  List[str]], List[Union[None, bool, float, int, str]], bool, float, int,
-        #  str]]` but got `Dict[str, Union[List[float], str]]`.
-        output = InstantiationBase.parameter_from_json(representation)
-        self.assertIsInstance(output, FixedParameter)
-        # pyre-fixme[16]: `Parameter` has no attribute `value`.
-        self.assertEqual(output.value, 1.0)
+        for use_dependents in [True, False]:
+            representation: dict[str, Any] = {
+                "name": "test",
+                "type": "choice",
+                "values": [1.0],
+            }
+            if use_dependents:
+                representation["dependents"] = {1.0: ["foo_or_bar", "bazz"]}
+            output = assert_is_instance(
+                InstantiationBase.parameter_from_json(representation), FixedParameter
+            )
+            self.assertIsInstance(output, FixedParameter)
+            self.assertEqual(output.value, 1.0)
+            if use_dependents:
+                self.assertEqual(output.dependents, {1.0: ["foo_or_bar", "bazz"]})
+
+    def test_choice_with_is_sorted(self) -> None:
+        for sort_values in [True, False, None]:
+            representation: dict[str, Any] = {
+                "name": "foo_or_bar",
+                "type": "choice",
+                "values": ["Foo", "Bar"],
+                "sort_values": sort_values,
+                "is_ordered": True,
+            }
+            output = assert_is_instance(
+                InstantiationBase.parameter_from_json(representation), ChoiceParameter
+            )
+            self.assertIsInstance(output, ChoiceParameter)
+            self.assertEqual(output.is_ordered, True)
+            if sort_values is None:
+                self.assertIsNone(sort_values)
+            else:
+                self.assertEqual(output.sort_values, sort_values)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            r"obj is not an instance of cls: obj=\['Foo'\] cls=<class 'bool'>",
+        ):
+            representation: dict[str, Any] = {
+                "name": "foo_or_bar",
+                "type": "choice",
+                "values": ["Foo", "Bar"],
+                "sort_values": ["Foo"],
+                "is_ordered": True,
+            }
+            _ = InstantiationBase.parameter_from_json(representation)
 
     def test_hss(self) -> None:
         parameter_dicts = [
@@ -246,86 +436,20 @@ class TestInstantiationtUtils(TestCase):
         # pyre-fixme[16]: `SearchSpace` has no attribute `_root`.
         self.assertEqual(search_space._root.name, "root")
 
-
-class TestRawDataToEvaluation(TestCase):
-    def test_raw_data_is_not_dict_of_dicts(self) -> None:
-        with self.assertRaises(ValueError):
-            InstantiationBase.raw_data_to_evaluation(
-                # pyre-fixme[6]: For 1st param expected `Union[Dict[str, Union[Tuple[...
-                raw_data={"arm_0": {"objective_a": 6}},
-                metric_names=["objective_a"],
-            )
-
-    def test_it_converts_to_floats_in_dict_and_leaves_tuples(self) -> None:
-        result = InstantiationBase.raw_data_to_evaluation(
-            # pyre-fixme[6]: For 1st param expected `Union[Dict[str, Union[Tuple[Unio...
-            raw_data={
-                "objective_a": 6,
-                "objective_b": 1.0,
-                "objective_c": ("some", "tuple"),
-            },
-            metric_names=["objective_a", "objective_b"],
+    def test_make_multitype_experiment_with_default_trial_type(self) -> None:
+        experiment = InstantiationBase.make_experiment(
+            name="test_make_experiment",
+            parameters=[{"name": "x", "type": "range", "bounds": [0, 1]}],
+            tracking_metric_names=None,
+            default_trial_type="test_trial_type",
+            default_runner=SyntheticRunner(),
         )
-        # pyre-fixme[16]: Item `float` of `Union[Dict[str, typing.Union[typing.Tuple[...
-        self.assertEqual(result["objective_a"], (6.0, None))
-        # pyre-fixme[16]: Item `float` of `Union[Dict[str, typing.Union[typing.Tuple[...
-        self.assertEqual(result["objective_b"], (1.0, None))
-        # pyre-fixme[16]: Item `float` of `Union[Dict[str, typing.Union[typing.Tuple[...
-        self.assertEqual(result["objective_c"], ("some", "tuple"))
+        self.assertEqual(experiment.__class__.__name__, "MultiTypeExperiment")
 
-    def test_dict_entries_must_be_int_float_or_tuple(self) -> None:
-        with self.assertRaises(ValueError):
-            InstantiationBase.raw_data_to_evaluation(
-                # pyre-fixme[6]: For 1st param expected `Union[Dict[str, Union[Tuple[...
-                raw_data={"objective_a": [6.0, None]},
-                metric_names=["objective_a"],
-            )
-
-    def test_it_requires_a_dict_for_multi_objectives(self) -> None:
-        with self.assertRaises(ValueError):
-            InstantiationBase.raw_data_to_evaluation(
-                raw_data=(6.0, None),
-                metric_names=["objective_a", "objective_b"],
-            )
-
-    def test_it_accepts_a_list_for_single_objectives(self) -> None:
-        raw_data = [({"arm__0": {}}, {"objective_a": (1.4, None)})]
-        result = InstantiationBase.raw_data_to_evaluation(
-            # pyre-fixme[6]: For 1st param expected `Union[Dict[str, Union[Tuple[Unio...
-            raw_data=raw_data,
-            metric_names=["objective_a"],
+    def test_make_single_type_experiment_with_no_default_trial_type(self) -> None:
+        experiment = InstantiationBase.make_experiment(
+            name="test_make_experiment",
+            parameters=[{"name": "x", "type": "range", "bounds": [0, 1]}],
+            tracking_metric_names=None,
         )
-        self.assertEqual(raw_data, result)
-
-    def test_it_turns_a_tuple_into_a_dict(self) -> None:
-        raw_data = (1.4, None)
-        result = InstantiationBase.raw_data_to_evaluation(
-            raw_data=raw_data,
-            metric_names=["objective_a"],
-        )
-        # pyre-fixme[16]: Item `float` of `Union[Dict[str, typing.Union[typing.Tuple[...
-        self.assertEqual(result["objective_a"], raw_data)
-
-    def test_it_turns_an_int_into_a_dict_of_tuple(self) -> None:
-        result = InstantiationBase.raw_data_to_evaluation(
-            raw_data=1,
-            metric_names=["objective_a"],
-        )
-        # pyre-fixme[16]: Item `float` of `Union[Dict[str, typing.Union[typing.Tuple[...
-        self.assertEqual(result["objective_a"], (1.0, None))
-
-    def test_it_turns_a_float_into_a_dict_of_tuple(self) -> None:
-        result = InstantiationBase.raw_data_to_evaluation(
-            raw_data=1.6,
-            metric_names=["objective_a"],
-        )
-        # pyre-fixme[16]: Item `float` of `Union[Dict[str, typing.Union[typing.Tuple[...
-        self.assertEqual(result["objective_a"], (1.6, None))
-
-    def test_it_raises_for_unexpected_types(self) -> None:
-        with self.assertRaises(ValueError):
-            InstantiationBase.raw_data_to_evaluation(
-                # pyre-fixme[6]: For 1st param expected `Union[Dict[str, Union[Tuple[...
-                raw_data="1.6",
-                metric_names=["objective_a"],
-            )
+        self.assertEqual(experiment.__class__.__name__, "Experiment")

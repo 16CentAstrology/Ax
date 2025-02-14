@@ -4,15 +4,17 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import itertools
 import logging
+from collections.abc import Sequence
 from functools import reduce
 from operator import mul
-from typing import Dict, List, Optional, Tuple
 
-import numpy as np
+import numpy.typing as npt
 from ax.core.types import TGenMetadata, TParamValue, TParamValueList
-from ax.models.discrete_base import DiscreteModel
+from ax.models.discrete_base import DiscreteGenerator
 from ax.models.types import TConfig
 from ax.utils.common.docutils import copy_doc
 from ax.utils.common.logger import get_logger
@@ -21,7 +23,7 @@ from ax.utils.common.logger import get_logger
 logger: logging.Logger = get_logger(__name__)
 
 
-class FullFactorialGenerator(DiscreteModel):
+class FullFactorialGenerator(DiscreteGenerator):
     """Generator for full factorial designs.
 
     Generates arms for all possible combinations of parameter values,
@@ -46,29 +48,31 @@ class FullFactorialGenerator(DiscreteModel):
         self.max_cardinality = max_cardinality
         self.check_cardinality = check_cardinality
 
-    @copy_doc(DiscreteModel.gen)
+    @copy_doc(DiscreteGenerator.gen)
+    # pyre-fixme[15]: Inconsistent override in return
     def gen(
         self,
         n: int,
-        parameter_values: List[TParamValueList],
-        objective_weights: Optional[np.ndarray],
-        outcome_constraints: Optional[Tuple[np.ndarray, np.ndarray]] = None,
-        fixed_features: Optional[Dict[int, TParamValue]] = None,
-        pending_observations: Optional[List[List[TParamValueList]]] = None,
-        model_gen_options: Optional[TConfig] = None,
-    ) -> Tuple[List[TParamValueList], List[float], TGenMetadata]:
-        if n != -1:
-            raise ValueError(
-                "FullFactorialGenerator will ignore the specified value of n. "
-                "The generator automatically determines how many arms to "
-                "generate."
-            )
-
+        parameter_values: Sequence[Sequence[TParamValue]],
+        objective_weights: npt.NDArray | None,
+        outcome_constraints: tuple[npt.NDArray, npt.NDArray] | None = None,
+        fixed_features: dict[int, TParamValue] | None = None,
+        pending_observations: Sequence[Sequence[Sequence[TParamValue]]] | None = None,
+        model_gen_options: TConfig | None = None,
+    ) -> tuple[list[TParamValueList], list[float], TGenMetadata]:
         if fixed_features:
+            # Make a copy so as to not mutate it
+            parameter_values = list(parameter_values)
             for fixed_feature_index, fixed_feature_value in fixed_features.items():
                 parameter_values[fixed_feature_index] = [fixed_feature_value]
 
         num_arms = reduce(mul, [len(values) for values in parameter_values], 1)
+        if n != num_arms:
+            logger.warning(
+                "FullFactorialGenerator will ignore the specified value of n. "
+                "The generator automatically determines how many arms to "
+                "generate."
+            )
         if self.check_cardinality and num_arms > self.max_cardinality:
             raise ValueError(
                 f"FullFactorialGenerator generated {num_arms} arms, "

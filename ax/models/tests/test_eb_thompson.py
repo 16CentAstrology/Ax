@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from unittest.mock import patch
 
 import numpy as np
@@ -22,20 +24,12 @@ class EmpiricalBayesThompsonSamplerTest(TestCase):
         self.parameter_values = [[1, 2, 3, 4], [1, 2, 3, 4]]
         self.outcome_names = ["x", "y"]  # not used for regular EB
 
-    def testEmpiricalBayesThompsonSamplerFit(self) -> None:
+    def test_EmpiricalBayesThompsonSamplerFit(self) -> None:
         generator = EmpiricalBayesThompsonSampler(min_weight=0.0)
         generator.fit(
-            # pyre-fixme[6]: For 1st param expected `List[List[List[Union[None,
-            #  bool, float, int, str]]]]` but got `List[List[List[int]]]`.
             Xs=self.Xs,
-            # pyre-fixme[6]: For 2nd param expected `List[List[float]]` but got
-            #  `List[List[int]]`.
             Ys=self.Ys,
-            # pyre-fixme[6]: For 3rd param expected `List[List[float]]` but got
-            #  `List[List[int]]`.
             Yvars=self.Yvars,
-            # pyre-fixme[6]: For 4th param expected `List[List[Union[None, bool,
-            #  float, int, str]]]` but got `List[List[int]]`.
             parameter_values=self.parameter_values,
             outcome_names=self.outcome_names,
         )
@@ -53,20 +47,12 @@ class EmpiricalBayesThompsonSamplerTest(TestCase):
             )
         )
 
-    def testEmpiricalBayesThompsonSamplerGen(self) -> None:
+    def test_EmpiricalBayesThompsonSamplerGen(self) -> None:
         generator = EmpiricalBayesThompsonSampler(min_weight=0.0)
         generator.fit(
-            # pyre-fixme[6]: For 1st param expected `List[List[List[Union[None,
-            #  bool, float, int, str]]]]` but got `List[List[List[int]]]`.
             Xs=self.Xs,
-            # pyre-fixme[6]: For 2nd param expected `List[List[float]]` but got
-            #  `List[List[int]]`.
             Ys=self.Ys,
-            # pyre-fixme[6]: For 3rd param expected `List[List[float]]` but got
-            #  `List[List[int]]`.
             Yvars=self.Yvars,
-            # pyre-fixme[6]: For 4th param expected `List[List[Union[None, bool,
-            #  float, int, str]]]` but got `List[List[int]]`.
             parameter_values=self.parameter_values,
             outcome_names=self.outcome_names,
         )
@@ -84,78 +70,52 @@ class EmpiricalBayesThompsonSamplerTest(TestCase):
         ):
             arms, weights, _ = generator.gen(
                 n=5,
-                # pyre-fixme[6]: For 2nd param expected `List[List[Union[None, bool,
-                #  float, int, str]]]` but got `List[List[int]]`.
                 parameter_values=self.parameter_values,
                 objective_weights=np.array([1, 0]),
             )
             self.assertEqual(arms, [[4, 4], [3, 3], [2, 2], [1, 1]])
             for weight, expected_weight in zip(
-                weights, [4 * i for i in [0.66, 0.25, 0.07, 0.02]]
+                weights, [5 * i for i in [0.66, 0.25, 0.07, 0.02]]
             ):
-                self.assertAlmostEqual(weight, expected_weight, 1)
+                self.assertAlmostEqual(weight, expected_weight, delta=0.1)
 
-    def testEmpiricalBayesThompsonSamplerWarning(self) -> None:
+    def test_EmpiricalBayesThompsonSamplerWarning(self) -> None:
         generator = EmpiricalBayesThompsonSampler(min_weight=0.0)
         generator.fit(
-            # pyre-fixme[6]: For 1st param expected `List[List[List[Union[None,
-            #  bool, float, int, str]]]]` but got `List[List[List[int]]]`.
             Xs=[x[:-1] for x in self.Xs],
-            # pyre-fixme[6]: For 2nd param expected `List[List[float]]` but got
-            #  `List[List[int]]`.
             Ys=[y[:-1] for y in self.Ys],
-            # pyre-fixme[6]: For 3rd param expected `List[List[float]]` but got
-            #  `List[List[int]]`.
             Yvars=[y[:-1] for y in self.Yvars],
-            # pyre-fixme[6]: For 4th param expected `List[List[Union[None, bool,
-            #  float, int, str]]]` but got `List[List[int]]`.
             parameter_values=self.parameter_values,
             outcome_names=self.outcome_names,
         )
         arms, weights, _ = generator.gen(
             n=5,
-            # pyre-fixme[6]: For 2nd param expected `List[List[Union[None, bool,
-            #  float, int, str]]]` but got `List[List[int]]`.
             parameter_values=self.parameter_values,
             objective_weights=np.array([1, 0]),
         )
         self.assertEqual(arms, [[3, 3], [2, 2], [1, 1]])
         for weight, expected_weight in zip(
-            weights, [3 * i for i in [0.74, 0.21, 0.05]]
+            weights, [5 * i for i in [0.74, 0.21, 0.05]]
         ):
             self.assertAlmostEqual(weight, expected_weight, delta=0.1)
 
-    def testEmpiricalBayesThompsonSamplerValidation(self) -> None:
+    def test_EmpiricalBayesThompsonSamplerValidation(self) -> None:
         generator = EmpiricalBayesThompsonSampler(min_weight=0.01)
         with self.assertRaises(ValueError):
             generator.fit(
                 Xs=[[[1, 1], [2, 2], [3, 3], [4, 4]], [[1, 1], [2, 2], [4, 4]]],
-                # pyre-fixme[6]: For 2nd param expected `List[List[float]]` but got
-                #  `List[List[int]]`.
                 Ys=self.Ys,
-                # pyre-fixme[6]: For 3rd param expected `List[List[float]]` but got
-                #  `List[List[int]]`.
                 Yvars=self.Yvars,
-                # pyre-fixme[6]: For 4th param expected `List[List[Union[None, bool,
-                #  float, int, str]]]` but got `List[List[int]]`.
                 parameter_values=self.parameter_values,
                 outcome_names=self.outcome_names,
             )
 
-    def testEmpiricalBayesThompsonSamplerPredict(self) -> None:
+    def test_EmpiricalBayesThompsonSamplerPredict(self) -> None:
         generator = EmpiricalBayesThompsonSampler(min_weight=0.0)
         generator.fit(
-            # pyre-fixme[6]: For 1st param expected `List[List[List[Union[None,
-            #  bool, float, int, str]]]]` but got `List[List[List[int]]]`.
             Xs=self.Xs,
-            # pyre-fixme[6]: For 2nd param expected `List[List[float]]` but got
-            #  `List[List[int]]`.
             Ys=self.Ys,
-            # pyre-fixme[6]: For 3rd param expected `List[List[float]]` but got
-            #  `List[List[int]]`.
             Yvars=self.Yvars,
-            # pyre-fixme[6]: For 4th param expected `List[List[Union[None, bool,
-            #  float, int, str]]]` but got `List[List[int]]`.
             parameter_values=self.parameter_values,
             outcome_names=self.outcome_names,
         )

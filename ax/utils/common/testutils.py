@@ -6,46 +6,44 @@
 
 # pyre-strict
 
-"""Support functions for tests
-"""
+"""Support functions for tests"""
 
 import contextlib
+import cProfile
 import io
 import linecache
+import logging
 import os
 import signal
-import subprocess
 import sys
 import types
 import unittest
-from functools import wraps
+import warnings
+from collections.abc import Callable, Generator
+from contextlib import AbstractContextManager
+from logging import Logger
+from pstats import Stats
 from types import FrameType
-from typing import (
-    Any,
-    Callable,
-    ContextManager,
-    Dict,
-    Generator,
-    List,
-    Optional,
-    Tuple,
-    Type,
-    TypeVar,
-    Union,
-)
-from unittest.mock import MagicMock
+from typing import Any, TypeVar, Union
 
-import yappi
-
+import numpy as np
+from ax.exceptions.core import AxParameterWarning
 from ax.utils.common.base import Base
+from ax.utils.common.constants import TESTENV_ENV_KEY, TESTENV_ENV_VAL
 from ax.utils.common.equality import object_attribute_dicts_find_unequal_fields
+from ax.utils.common.logger import get_logger
+from botorch.exceptions.warnings import InputDataWarning
+from pyfakefs import fake_filesystem_unittest
 
 
-T_AX_BASE_OR_ATTR_DICT = Union[Base, Dict[str, Any]]
+T_AX_BASE_OR_ATTR_DICT = Union[Base, dict[str, Any]]
+COMPARISON_STR_MAX_LEVEL = 8
 T = TypeVar("T")
 
+logger: Logger = get_logger(__name__)
 
-def _get_tb_lines(tb: types.TracebackType) -> List[Tuple[str, int, str]]:
+
+def _get_tb_lines(tb: types.TracebackType) -> list[tuple[str, int, str]]:
     """Get the filename and line number and line contents of all the lines in the
     traceback with the root at the top.
     """
@@ -70,38 +68,33 @@ class _AssertRaisesContextOn(unittest.case._AssertRaisesContext):
        filename: the file in which the error occured
     """
 
-    _expected_line: Optional[str]
-    lineno: Optional[int]
-    filename: Optional[str]
+    _expected_line: str | None
+    lineno: int | None
+    filename: str | None
 
     def __init__(
         self,
-        expected: Type[Exception],
+        expected: type[Exception],
         test_case: unittest.TestCase,
-        expected_line: Optional[str] = None,
-        expected_regex: Optional[str] = None,
+        expected_line: str | None = None,
+        expected_regex: str | None = None,
     ) -> None:
         self._expected_line = (
             expected_line.strip() if expected_line is not None else None
         )
         self.lineno = None
         self.filename = None
-        # pyre-fixme[28]: Unexpected keyword argument `expected`.
         super().__init__(
             expected=expected, test_case=test_case, expected_regex=expected_regex
         )
 
     # pyre-fixme[14]: `__exit__` overrides method defined in `_AssertRaisesContext`
     #  inconsistently.
-    # pyre-fixme[14]: `__exit__` overrides method defined in `_AssertRaisesContext`
-    #  inconsistently.
-    # pyre-fixme[14]: `__exit__` overrides method defined in `_AssertRaisesContext`
-    #  inconsistently.
     def __exit__(
         self,
-        exc_type: Optional[Type[Exception]],
-        exc_value: Optional[Exception],
-        tb: Optional[types.TracebackType],
+        exc_type: type[Exception] | None,
+        exc_value: Exception | None,
+        tb: types.TracebackType | None,
     ) -> bool:
         """This is called when the context closes. If an exception was raised
         `exc_type`, `exc_value` and `tb` will be set.
@@ -126,11 +119,8 @@ class _AssertRaisesContextOn(unittest.case._AssertRaisesContext):
 
 # Instead of showing a warning (like in the standard library) we throw an error when
 # deprecated functions are called.
-# pyre-fixme[24]: Generic type `Callable` expects 2 type parameters.
-# pyre-fixme[24]: Generic type `Callable` expects 2 type parameters.
-# pyre-fixme[24]: Generic type `Callable` expects 2 type parameters.
 def _deprecate(original_func: Callable) -> Callable:
-    def _deprecated_func(*args: List[Any], **kwargs: Dict[str, Any]) -> None:
+    def _deprecated_func(*args: list[Any], **kwargs: dict[str, Any]) -> None:
         raise RuntimeError(
             f"This function is deprecated please use {original_func.__name__} "
             "instead."
@@ -185,32 +175,52 @@ def _build_comparison_str(
     def _unequal_str(first: Any, second: Any) -> str:  # pyre-ignore[2]
         return f"{first} (type {type(first)}) != {second} (type {type(second)})."
 
-    if first == second or level > 3:
-        # Don't go deeper than 4 levels as the inequality report will not be legible.
+    if first == second:
         return ""
+
+    if level > COMPARISON_STR_MAX_LEVEL:
+        # Don't go deeper than 4 levels as the inequality report will not be legible.
+        return (
+            f"\n... also there were unequal fields at levels {level}+; "
+            "to see full comparison past this level, adjust `ax.utils.common.testutils."
+            "COMPARISON_STR_MAX_LEVEL`"
+        )
 
     msg = ""
     indent = " " * level * 4
-    _, unequal_val = object_attribute_dicts_find_unequal_fields(
+    unequal_types, unequal_val = object_attribute_dicts_find_unequal_fields(
         one_dict=first.__dict__ if isinstance(first, Base) else first,
         other_dict=second.__dict__ if isinstance(second, Base) else second,
         fast_return=False,
         skip_db_id_check=skip_db_id_check,
     )
+    unequal_types_suffixed = {
+        f"{k} (field had values of unequal type)": v for k, v in unequal_types.items()
+    }
     if level == 0:
         msg += f"{_unequal_str(first=first, second=second)}\n"
 
     msg += f"\n{indent}Fields with different values{values_in_suffix}:\n"
-    for idx, (field, (first, second)) in enumerate(unequal_val.items()):
+    joint_unequal_field_dict = {**unequal_val, **unequal_types_suffixed}
+    for idx, (field, (first, second)) in enumerate(joint_unequal_field_dict.items()):
         # For level 0, use numbers as bullets. For 1, use letters. For 2, use "i".
-        # For 3, use "*".
+        # For 3+, use "*".
         bul = "*"
         if level == 0:
             bul = f"{idx + 1})"
-        if level == 1:
+        elif level == 1:
             bul = f"{chr(ord('a') + idx)})"
-        if level == 2:
+        elif level == 2:
             bul = f"{'i' * (idx + 1)})"
+        elif level <= COMPARISON_STR_MAX_LEVEL:
+            # Add default for when setting `COMPARISON_STR_MAX_LEVEL` to higher value
+            # during debugging.
+            bul = "*"
+        else:
+            raise RuntimeError(
+                "Reached level > `COMPARISON_STR_MAX_LEVEL`, which should've been "
+                "unreachable."
+            )
         msg += f"\n{indent}{bul} {field}: {_unequal_str(first=first, second=second)}\n"
         if isinstance(first, (dict, Base)) and isinstance(second, (dict, Base)):
             msg += _build_comparison_str(
@@ -233,90 +243,109 @@ def _build_comparison_str(
     return msg
 
 
-def setup_import_mocks(mocked_import_paths: List[str]) -> None:
-    for import_path in mocked_import_paths:
-        sys.modules[import_path] = MagicMock()
-
-
-class TestCase(unittest.TestCase):
+class TestCase(fake_filesystem_unittest.TestCase):
     """The base Ax test case, contains various helper functions to write unittests."""
 
-    # try to remove these files on tearDown
-    FILES_TO_CLEAN: List[str] = []
-
-    MAX_TEST_SECONDS = 480
-    MIN_TTOT = 1.0
-    PROFILER_COLUMNS = {
-        0: ("name", 100),  # default 36 is often not enough
-        1: ("ncall", 5),
-        2: ("tsub", 8),
-        3: ("ttot", 8),
-        4: ("tavg", 8),
-    }
-    # some test cases have a conflict with the profiler(P511247687)
-    # it appears to be pytorch related https://fburl.com/wiki/r8u9f3rs
-    # set to `False` on the specific testcase class if this occurs
-    CAN_PROFILE = True
-    _prior_status: Optional[str] = None
+    MAX_TEST_SECONDS = 60
+    NUMBER_OF_PROFILER_LINES_TO_OUTPUT = 20
+    PROFILE_TESTS = False
+    _long_test_active_reason: str | None = None
 
     def __init__(self, methodName: str = "runTest") -> None:
-        def signal_handler(signum: int, frame: Optional[FrameType]) -> None:
-            if self.CAN_PROFILE:
-                yappi.get_func_stats(
-                    filter_callback=lambda s: s.ttot > self.MIN_TTOT
-                ).sort(sort_type="ttot", sort_order="asc").print_all(
-                    columns=self.PROFILER_COLUMNS
+        def signal_handler(signum: int, frame: FrameType | None) -> None:
+            message = f"Test took longer than {self.MAX_TEST_SECONDS} seconds."
+            if self.PROFILE_TESTS:
+                self._print_profiler_output()
+            else:
+                message += (
+                    " To see a profiler output, set `TestCase.PROFILE_TESTS` to `True`."
                 )
-            raise Exception(f"Test timed out at {self.MAX_TEST_SECONDS} seconds")
+            if hasattr(sys, "gettrace") and sys.gettrace() is not None:
+                # If we're in a debugger session, let the test continue running.
+                return
+            elif self._long_test_active_reason is None:
+                message += (
+                    " To specify a reason for a long running test,"
+                    + " utilize the @ax_long_test decorator. If your test "
+                    + "is long because it's doing modeling, please use the "
+                    + "@mock_botorch_optimize decorator and see if that helps."
+                )
+                raise TimeoutError(message)
+            else:
+                message += (
+                    " Reason for long running test: " + self._long_test_active_reason
+                )
+                logger.warning(message)
 
         super().__init__(methodName=methodName)
         signal.signal(signal.SIGALRM, signal_handler)
+        # This is set to indicate we are running in a test environment.  Code can check
+        # this to:
+        # * more strictly enforce SQL encoding
+        #  (https://github.com/facebook/Ax/blob/main/ax/storage/sqa_store/save.py#L598)
+        # * avoid actions that will affect product environments
+        os.environ[TESTENV_ENV_KEY] = TESTENV_ENV_VAL
 
-    def tearDown(self) -> None:
-        for f in self.FILES_TO_CLEAN:
-            if os.path.exists(f):
-                os.remove(f)
+    def setUp(self) -> None:
+        """
+        Only show log messages of WARNING or higher while testing.
+
+        Ax prints a lot of INFO logs that are not relevant for unit tests.
+
+        Also silences a number of common warnings originating from Ax & BoTorch.
+        """
+        super().setUp()
+        self.profiler = cProfile.Profile()
+        if self.PROFILE_TESTS:
+            self.profiler.enable()
+            self.addCleanup(self.profiler.disable)
+        logger = get_logger(__name__, level=logging.WARNING)
+        # Parent handlers are shared, so setting the level this
+        # way applies it to all Ax loggers.
+        if logger.parent is not None and hasattr(logger.parent, "handlers"):
+            logger.parent.handlers[0].setLevel(logging.WARNING)
+
+        # Choice parameter default parameter type / is_ordered warnings.
+        warnings.filterwarnings(
+            "ignore",
+            message=".*is not specified for .ChoiceParameter.*",
+            category=AxParameterWarning,
+        )
+        # BoTorch float32 warning.
+        warnings.filterwarnings(
+            "ignore",
+            message="The model inputs are of type",
+            category=InputDataWarning,
+        )
+        # BoTorch input standardization warnings.
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Data \(outcome observations\) is not standardized ",
+            category=InputDataWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Data \(input features\) is not",
+            category=InputDataWarning,
+        )
 
     def run(
-        self, result: Optional[unittest.result.TestResult] = ...
-    ) -> Optional[unittest.result.TestResult]:
+        self, result: unittest.result.TestResult | None = ...
+    ) -> unittest.result.TestResult | None:
         # Arrange for a SIGALRM signal to be delivered to the calling process
         # in specified number of seconds.
         signal.alarm(self.MAX_TEST_SECONDS)
-        self._prior_status = self._get_repository_status()
         try:
-            if self.CAN_PROFILE:
-                yappi.set_clock_type("wall")
-                yappi.start()
-
             result = super().run(result)
         finally:
-            if self.CAN_PROFILE:
-                yappi.stop()
-
             signal.alarm(0)
-        self._assert_status_is_unchanged()
         return result
-
-    def _get_repository_status(self) -> str:
-        return subprocess.run(
-            ["hg", "status"],
-            capture_output=True,
-        ).stdout.decode("utf-8")
-
-    def _assert_status_is_unchanged(self) -> None:
-        post_status = self._get_repository_status()
-        self.assertEqual(
-            self._prior_status,
-            post_status,
-            "Files in the repository were modified while this test was running",
-        )
 
     def assertEqual(
         self,
         first: Any,  # pyre-ignore[2]
         second: Any,  # pyre-ignore[2]
-        msg: Optional[str] = None,
+        msg: str | None = None,
     ) -> None:
         if isinstance(first, Base) and isinstance(second, Base):
             self.assertAxBaseEqual(first=first, second=second, msg=msg)
@@ -327,7 +356,7 @@ class TestCase(unittest.TestCase):
         self,
         first: Base,
         second: Base,
-        msg: Optional[str] = None,
+        msg: str | None = None,
         skip_db_id_check: bool = False,
     ) -> None:
         """Check that two Ax objects that subclass ``Base`` are equal or raise
@@ -351,26 +380,95 @@ class TestCase(unittest.TestCase):
             second, Base, "Second argument is not a subclass of Ax `Base`."
         )
         if (
-            first._eq_skip_db_id_check(other=second)
+            not first._eq_skip_db_id_check(other=second)
             if skip_db_id_check
             else first != second
         ):
             raise self.failureException(
-                _build_comparison_str(
+                "Encountered unequal objects. This Ax utility will now attempt an "
+                "in-depth comparison of the objects to print out the actually "
+                "unequal fields within them. Note that the resulting printout is "
+                "a nested comparison, and you'll find the actual unequal fields at "
+                "the very bottom. Don't be scared of the long printout : )\n\n"
+                + _build_comparison_str(
                     first=first, second=second, skip_db_id_check=skip_db_id_check
                 ),
             )
 
     def assertRaisesOn(
         self,
-        exc: Type[Exception],
-        line: Optional[str] = None,
-        regex: Optional[str] = None,
-    ) -> ContextManager[None]:
+        exc: type[Exception],
+        line: str | None = None,
+        regex: str | None = None,
+        # pyre-ignore[24]: Generic type `AbstractContextManager`
+        # expects 2 type parameters, received 1.
+    ) -> AbstractContextManager[None]:
         """Assert that an exception is raised on a specific line."""
         context = _AssertRaisesContextOn(exc, self, line, regex)
-        # pyre-ignore [16]: ... has no attribute `handle`.
         return context.handle("assertRaisesOn", [], {})
+
+    def assertDictsAlmostEqual(
+        self, a: dict[str, Any], b: dict[str, Any], consider_nans_equal: bool = False
+    ) -> None:
+        """Testing utility that checks that
+        1) the keys of `a` and `b` are identical, and that
+        2) the values of `a` and `b` are almost equal if they have a floating point
+        type, considering NaNs as equal, and otherwise just equal.
+
+        Args:
+            test: The test case object.
+            a: A dictionary.
+            b: Another dictionary.
+            consider_nans_equal: Whether to consider NaNs equal when comparing floating
+                point numbers.
+        """
+        set_a = set(a.keys())
+        set_b = set(b.keys())
+        key_msg = (
+            "Dict keys differ."
+            f"Keys that are in a but not b: {set_a - set_b}."
+            f"Keys that are in b but not a: {set_b - set_a}."
+        )
+        self.assertEqual(set_a, set_b, msg=key_msg)
+        for field in b:
+            a_field = a[field]
+            b_field = b[field]
+            msg = f"Dict values differ for key {field}: {a[field]=}, {b[field]=}."
+            # for floating point values, compare approximately and consider NaNs equal
+            if isinstance(a_field, float):
+                if consider_nans_equal and np.isnan(a_field):
+                    self.assertTrue(np.isnan(b_field), msg=msg)
+                else:
+                    self.assertAlmostEqual(a_field, b_field, msg=msg)
+            else:
+                self.assertEqual(a_field, b_field, msg=msg)
+
+    def assertIsSubDict(
+        self,
+        subdict: dict[str, Any],
+        superdict: dict[str, Any],
+        almost_equal: bool = False,
+        consider_nans_equal: bool = False,
+    ) -> None:
+        """Testing utility that checks that all keys and values of `subdict` are
+        contained in `dict`.
+
+        Args:
+            subdict: A smaller dictionary.
+            superdict: A larger dictionary which should contain all keys of subdict
+                and the same values as subdict for the corresponding keys.
+        """
+        intersection_dict = {k: superdict[k] for k in subdict if k in superdict}
+        if consider_nans_equal and not almost_equal:
+            raise ValueError(
+                "`consider_nans_equal` can only be used with `almost_equal`"
+            )
+        if almost_equal:
+            self.assertDictsAlmostEqual(
+                subdict, intersection_dict, consider_nans_equal=consider_nans_equal
+            )
+        else:
+            self.assertEqual(subdict, intersection_dict)
 
     @staticmethod
     @contextlib.contextmanager
@@ -391,24 +489,40 @@ class TestCase(unittest.TestCase):
         finally:
             sys.stderr = old_err
 
+    def _print_profiler_output(self) -> None:
+        """Print profiler output to stdout."""
+        s = io.StringIO()
+        ps = Stats(self.profiler, stream=s).sort_stats("cumulative").reverse_order()
+        ps.print_stats()
+        output = s.getvalue().splitlines()
+        headers = output[:5]
+        # Print the headers
+        for line in headers:
+            print(line)
+        # Print the longest running functions
+        for line in output[-self.NUMBER_OF_PROFILER_LINES_TO_OUTPUT :]:
+            print(line)
+
+    @classmethod
+    @contextlib.contextmanager
+    def ax_long_test(cls, reason: str | None) -> Generator[None, None, None]:
+        cls._long_test_active_reason = reason
+        yield
+        cls._long_test_active_reason = None
+
     # This list is taken from the python standard library
-    # pyre-fixme[4]: Attribute must be annotated.
     # pyre-fixme[4]: Attribute must be annotated.
     failUnlessEqual = assertEquals = _deprecate(unittest.TestCase.assertEqual)
     # pyre-fixme[4]: Attribute must be annotated.
-    # pyre-fixme[4]: Attribute must be annotated.
     failIfEqual = assertNotEquals = _deprecate(unittest.TestCase.assertNotEqual)
-    # pyre-fixme[4]: Attribute must be annotated.
     # pyre-fixme[4]: Attribute must be annotated.
     failUnlessAlmostEqual = assertAlmostEquals = _deprecate(
         unittest.TestCase.assertAlmostEqual
     )
     # pyre-fixme[4]: Attribute must be annotated.
-    # pyre-fixme[4]: Attribute must be annotated.
     failIfAlmostEqual = assertNotAlmostEquals = _deprecate(
         unittest.TestCase.assertNotAlmostEqual
     )
-    # pyre-fixme[4]: Attribute must be annotated.
     # pyre-fixme[4]: Attribute must be annotated.
     failUnless = assert_ = _deprecate(unittest.TestCase.assertTrue)
     # pyre-fixme[4]: Attribute must be annotated.
@@ -421,16 +535,3 @@ class TestCase(unittest.TestCase):
     assertRegexpMatches = _deprecate(unittest.TestCase.assertRegex)
     # pyre-fixme[4]: Attribute must be annotated.
     assertNotRegexpMatches = _deprecate(unittest.TestCase.assertNotRegex)
-
-
-def disable_profiler(f: Callable[..., T]) -> Callable[..., T]:
-    """Not all tests are compatible with yappi.  This wrapper can be used
-    on a test to stop profiling instead of disabling it for the entire
-    test case"""
-
-    @wraps(f)
-    def inner(self: TestCase, *args: Any, **kwargs: Any) -> T:
-        yappi.stop()
-        return f(self, *args, **kwargs)
-
-    return inner

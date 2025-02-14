@@ -4,28 +4,27 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 # flake8: noqa F401
 from ax.modelbridge import transforms
-from ax.modelbridge.base import ModelBridge
+from ax.modelbridge.base import Adapter
 from ax.modelbridge.factory import (
+    Generators,
     get_factorial,
-    get_GPEI,
     get_sobol,
     get_thompson,
     get_uniform,
-    Models,
 )
-from ax.modelbridge.map_torch import MapTorchModelBridge
-from ax.modelbridge.torch import TorchModelBridge
+from ax.modelbridge.map_torch import MapTorchAdapter
+from ax.modelbridge.torch import TorchAdapter
 
 __all__ = [
-    "MapTorchModelBridge",
-    "ModelBridge",
-    "Models",
-    "TorchModelBridge",
+    "MapTorchAdapter",
+    "Adapter",
+    "Generators",
+    "TorchAdapter",
     "get_factorial",
-    "get_GPEI",
-    "get_GPKG",
     "get_sobol",
     "get_thompson",
     "get_uniform",

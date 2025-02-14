@@ -4,30 +4,33 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import torch
 from ax.core.search_space import SearchSpaceDigest
 from ax.models.torch.randomforest import RandomForest
 from ax.utils.common.testutils import TestCase
-from botorch.utils.datasets import FixedNoiseDataset
+from botorch.utils.datasets import SupervisedDataset
 
 
 class RandomForestTest(TestCase):
-    def testRFModel(self) -> None:
+    def test_RFModel(self) -> None:
         datasets = [
-            FixedNoiseDataset(
-                X=torch.rand(10, 2), Y=torch.rand(10, 1), Yvar=torch.rand(10, 1)
+            SupervisedDataset(
+                X=torch.rand(10, 2),
+                Y=torch.rand(10, 1),
+                Yvar=torch.rand(10, 1),
+                feature_names=["x1", "x2"],
+                outcome_names=[f"y{i}"],
             )
-            for _ in range(2)
+            for i in range(2)
         ]
 
         m = RandomForest(num_trees=5)
         m.fit(
             datasets=datasets,
-            metric_names=["y1", "y2"],
             search_space_digest=SearchSpaceDigest(
                 feature_names=["x1", "x2"],
-                # pyre-fixme[6]: For 2nd param expected `List[Tuple[Union[float,
-                #  int], Union[float, int]]]` but got `List[Tuple[int, int]]`.
                 bounds=[(0, 1)] * 2,
             ),
         )

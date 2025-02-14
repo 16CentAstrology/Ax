@@ -4,13 +4,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Optional
+# pyre-strict
+
 from unittest import mock
 
 from ax.core.arm import Arm
 from ax.core.metric import Metric
 from ax.core.search_space import SearchSpace
-from ax.modelbridge.base import ModelBridge
+from ax.modelbridge.base import Adapter
 from ax.models.discrete.full_factorial import FullFactorialGenerator
 from ax.plot.scatter import tile_fitted, tile_observations
 from ax.utils.common.testutils import TestCase
@@ -36,10 +37,10 @@ def get_modelbridge(
     mock_gen_arms,
     # pyre-fixme[2]: Parameter must be annotated.
     mock_observations_from_data,
-    status_quo_name: Optional[str] = None,
-) -> ModelBridge:
+    status_quo_name: str | None = None,
+) -> Adapter:
     exp = get_experiment()
-    modelbridge = ModelBridge(
+    modelbridge = Adapter(
         search_space=get_search_space(),
         model=FullFactorialGenerator(),
         experiment=exp,
@@ -47,7 +48,7 @@ def get_modelbridge(
         status_quo_name=status_quo_name,
     )
     modelbridge._predict = mock.MagicMock(
-        "ax.modelbridge.base.ModelBridge._predict",
+        "ax.modelbridge.base.Adapter._predict",
         autospec=True,
         return_value=[get_observation().data],
     )
@@ -55,7 +56,7 @@ def get_modelbridge(
 
 
 class TileFittedTest(TestCase):
-    def testTileFitted(self) -> None:
+    def test_TileFitted(self) -> None:
         model = get_modelbridge(status_quo_name=None)
 
         # Should throw if `status_quo_arm` is None and rel=True
@@ -88,9 +89,6 @@ class TileFittedTest(TestCase):
             self.assertEqual(config.data["data"][i]["x"], ["1_1"])
             self.assertEqual(config.data["data"][i]["y"], [0.0])
             self.assertEqual(config.data["data"][i]["type"], "scatter")
-            self.assertEqual(
-                config.data["data"][i]["error_y"]["array"], [138.59292911256333]
-            )
             self.assertIn("Arm 1_1", config.data["data"][i]["text"][0])
             self.assertIn("[-138.593%, 138.593%]", config.data["data"][i]["text"][0])
             self.assertIn("0.0%", config.data["data"][i]["text"][0])
@@ -115,7 +113,7 @@ class TileFittedTest(TestCase):
 
 
 class TileObservationsTest(TestCase):
-    def testTileObservations(self) -> None:
+    def test_TileObservations(self) -> None:
         exp = get_experiment_with_data()
         exp.trials[0].run()
         exp.trials[0].mark_completed()
@@ -141,8 +139,18 @@ class TileObservationsTest(TestCase):
         ]:
             self.assertIn(key, config.data["layout"])
 
+        self.assertEqual(
+            config.data["layout"]["annotations"][0]["text"], "ax_test_metric"
+        )
+
         # Data
         self.assertEqual(config.data["data"][0]["x"], ["0_1", "0_2"])
         self.assertEqual(config.data["data"][0]["y"], [2.0, 2.25])
         self.assertEqual(config.data["data"][0]["type"], "scatter")
         self.assertIn("Arm 0_1", config.data["data"][0]["text"][0])
+
+        label_dict = {"ax_test_metric": "mapped_name"}
+        config = tile_observations(
+            experiment=exp, arm_names=["0_1", "0_2"], rel=False, label_dict=label_dict
+        )
+        self.assertEqual(config.data["layout"]["annotations"][0]["text"], "mapped_name")

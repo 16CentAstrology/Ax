@@ -4,7 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Dict, List, Optional, Set, Tuple
+# pyre-strict
+
 
 from ax.core.observation import (
     Observation,
@@ -17,45 +18,48 @@ from ax.core.parameter import ChoiceParameter, FixedParameter
 from ax.core.search_space import SearchSpace
 from ax.core.types import TParamValueList
 from ax.exceptions.core import UserInputError
-from ax.modelbridge.base import GenResults, ModelBridge
-from ax.modelbridge.modelbridge_utils import array_to_observation_data
+from ax.modelbridge.base import Adapter, GenResults
+from ax.modelbridge.modelbridge_utils import (
+    array_to_observation_data,
+    get_fixed_features,
+)
 from ax.modelbridge.torch import (
     extract_objective_weights,
     extract_outcome_constraints,
-    validate_optimization_config,
+    validate_transformed_optimization_config,
 )
-from ax.models.discrete_base import DiscreteModel
+from ax.models.discrete_base import DiscreteGenerator
 from ax.models.types import TConfig
 
 
 FIT_MODEL_ERROR = "Model must be fit before {action}."
 
 
-# pyre-fixme[13]: Attribute `model` is never initialized.
-# pyre-fixme[13]: Attribute `outcomes` is never initialized.
-# pyre-fixme[13]: Attribute `parameters` is never initialized.
-# pyre-fixme[13]: Attribute `search_space` is never initialized.
-class DiscreteModelBridge(ModelBridge):
+class DiscreteAdapter(Adapter):
     """A model bridge for using models based on discrete parameters.
 
     Requires that all parameters have been transformed to ChoiceParameters.
     """
 
-    model: DiscreteModel
-    outcomes: List[str]
-    parameters: List[str]
-    search_space: Optional[SearchSpace]
+    # pyre-fixme[13]: Attribute `model` is never initialized.
+    model: DiscreteGenerator
+    # pyre-fixme[13]: Attribute `outcomes` is never initialized.
+    outcomes: list[str]
+    # pyre-fixme[13]: Attribute `parameters` is never initialized.
+    parameters: list[str]
+    # pyre-fixme[13]: Attribute `search_space` is never initialized.
+    search_space: SearchSpace | None
 
     def _fit(
         self,
-        model: DiscreteModel,
+        model: DiscreteGenerator,
         search_space: SearchSpace,
-        observations: List[Observation],
+        observations: list[Observation],
     ) -> None:
         self.model = model
         # Convert observations to arrays
         self.parameters = list(search_space.parameters.keys())
-        all_metric_names: Set[str] = set()
+        all_metric_names: set[str] = set()
         observation_features, observation_data = separate_observations(observations)
         for od in observation_data:
             all_metric_names.update(od.metric_names)
@@ -78,8 +82,8 @@ class DiscreteModelBridge(ModelBridge):
         )
 
     def _predict(
-        self, observation_features: List[ObservationFeatures]
-    ) -> List[ObservationData]:
+        self, observation_features: list[ObservationFeatures]
+    ) -> list[ObservationData]:
         # Convert observations to array
         X = [
             [of.parameters[param] for param in self.parameters]
@@ -92,13 +96,13 @@ class DiscreteModelBridge(ModelBridge):
     def _validate_gen_inputs(
         self,
         n: int,
-        search_space: Optional[SearchSpace] = None,
-        optimization_config: Optional[OptimizationConfig] = None,
-        pending_observations: Optional[Dict[str, List[ObservationFeatures]]] = None,
-        fixed_features: Optional[ObservationFeatures] = None,
-        model_gen_options: Optional[TConfig] = None,
+        search_space: SearchSpace | None = None,
+        optimization_config: OptimizationConfig | None = None,
+        pending_observations: dict[str, list[ObservationFeatures]] | None = None,
+        fixed_features: ObservationFeatures | None = None,
+        model_gen_options: TConfig | None = None,
     ) -> None:
-        """Validate inputs to `ModelBridge.gen`.
+        """Validate inputs to `Adapter.gen`.
 
         Currently, this is only used to ensure that `n` is a positive integer or -1.
         """
@@ -112,27 +116,29 @@ class DiscreteModelBridge(ModelBridge):
         self,
         n: int,
         search_space: SearchSpace,
-        pending_observations: Dict[str, List[ObservationFeatures]],
-        fixed_features: ObservationFeatures,
-        model_gen_options: Optional[TConfig] = None,
-        optimization_config: Optional[OptimizationConfig] = None,
+        pending_observations: dict[str, list[ObservationFeatures]],
+        fixed_features: ObservationFeatures | None,
+        model_gen_options: TConfig | None = None,
+        optimization_config: OptimizationConfig | None = None,
     ) -> GenResults:
         """Generate new candidates according to search_space and
         optimization_config.
 
-        The outcome constraints should be transformed to no longer be relative.
+        Any outcome constraints should be transformed to no longer be relative, this
+        can be achieved using either ``Relativize`` or ``Derelativize`` transforms.
+        An error will be raised during validation if transform has not been applied.
         """
         # Validation
-        if not self.parameters:  # pragma: no cover
+        if not self.parameters:
             raise ValueError(FIT_MODEL_ERROR.format(action="_gen"))
         # Extract parameter values
         parameter_values = _get_parameter_values(search_space, self.parameters)
         # Extract objective and outcome constraints
-        if len(self.outcomes) == 0 or optimization_config is None:  # pragma: no cover
+        if len(self.outcomes) == 0 or optimization_config is None:
             objective_weights = None
             outcome_constraints = None
         else:
-            validate_optimization_config(optimization_config, self.outcomes)
+            validate_transformed_optimization_config(optimization_config, self.outcomes)
             objective_weights = extract_objective_weights(
                 objective=optimization_config.objective, outcomes=self.outcomes
             )
@@ -142,17 +148,13 @@ class DiscreteModelBridge(ModelBridge):
             )
 
         # Get fixed features
-        fixed_features_dict = {
-            self.parameters.index(p_name): val
-            for p_name, val in fixed_features.parameters.items()
-        }
-        fixed_features_dict = (
-            fixed_features_dict if len(fixed_features_dict) > 0 else None
+        fixed_features_dict = get_fixed_features(
+            fixed_features=fixed_features, param_names=self.parameters
         )
 
         # Pending observations
         if len(pending_observations) == 0:
-            pending_array: Optional[List[List[TParamValueList]]] = None
+            pending_array: list[list[TParamValueList]] | None = None
         else:
             pending_array = [[] for _ in self.outcomes]
             for metric_name, po_list in pending_observations.items():
@@ -166,31 +168,35 @@ class DiscreteModelBridge(ModelBridge):
             parameter_values=parameter_values,
             objective_weights=objective_weights,
             outcome_constraints=outcome_constraints,
-            fixed_features=fixed_features_dict,
+            fixed_features=fixed_features_dict,  # pyre-ignore
             pending_observations=pending_array,
             model_gen_options=model_gen_options,
         )
-        observation_features = []
-        for x in X:
-            observation_features.append(
-                ObservationFeatures(
-                    parameters={p: x[i] for i, p in enumerate(self.parameters)}
-                )
+        observation_features = [
+            ObservationFeatures(parameters=dict(zip(self.parameters, x))) for x in X
+        ]
+
+        if "best_x" in gen_metadata:
+            best_observation_features = ObservationFeatures(
+                parameters=dict(zip(self.parameters, gen_metadata["best_x"]))
             )
-        # TODO[drfreund, bletham]: implement best_point identification and
-        # return best_point instead of None
+        else:
+            best_observation_features = None
+
         return GenResults(
             observation_features=observation_features,
             weights=w,
             gen_metadata=gen_metadata,
+            best_observation_features=best_observation_features,
         )
 
     def _cross_validate(
         self,
         search_space: SearchSpace,
-        cv_training_data: List[Observation],
-        cv_test_points: List[ObservationFeatures],
-    ) -> List[ObservationData]:
+        cv_training_data: list[Observation],
+        cv_test_points: list[ObservationFeatures],
+        use_posterior_predictive: bool = False,
+    ) -> list[ObservationData]:
         """Make predictions at cv_test_points using only the data in obs_feats
         and obs_data.
         """
@@ -207,7 +213,11 @@ class DiscreteModelBridge(ModelBridge):
         ]
         # Use the model to do the cross validation
         f_test, cov_test = self.model.cross_validate(
-            Xs_train=Xs_train, Ys_train=Ys_train, Yvars_train=Yvars_train, X_test=X_test
+            Xs_train=Xs_train,
+            Ys_train=Ys_train,
+            Yvars_train=Yvars_train,
+            X_test=X_test,
+            use_posterior_predictive=use_posterior_predictive,
         )
         # Convert array back to ObservationData
         return array_to_observation_data(f=f_test, cov=cov_test, outcomes=self.outcomes)
@@ -215,14 +225,14 @@ class DiscreteModelBridge(ModelBridge):
     @classmethod
     def _convert_observations(
         cls,
-        observation_data: List[ObservationData],
-        observation_features: List[ObservationFeatures],
-        outcomes: List[str],
-        parameters: List[str],
-    ) -> Tuple[List[List[TParamValueList]], List[List[float]], List[List[float]]]:
-        Xs: List[List[TParamValueList]] = [[] for _ in outcomes]
-        Ys: List[List[float]] = [[] for _ in outcomes]
-        Yvars: List[List[float]] = [[] for _ in outcomes]
+        observation_data: list[ObservationData],
+        observation_features: list[ObservationFeatures],
+        outcomes: list[str],
+        parameters: list[str],
+    ) -> tuple[list[list[TParamValueList]], list[list[float]], list[list[float]]]:
+        Xs: list[list[TParamValueList]] = [[] for _ in outcomes]
+        Ys: list[list[float]] = [[] for _ in outcomes]
+        Yvars: list[list[float]] = [[] for _ in outcomes]
         for i, obsf in enumerate(observation_features):
             try:
                 x = [obsf.parameters[param] for param in parameters]
@@ -238,10 +248,10 @@ class DiscreteModelBridge(ModelBridge):
 
 
 def _get_parameter_values(
-    search_space: SearchSpace, param_names: List[str]
-) -> List[TParamValueList]:
+    search_space: SearchSpace, param_names: list[str]
+) -> list[TParamValueList]:
     """Extract parameter values from a search space of discrete parameters."""
-    parameter_values: List[TParamValueList] = []
+    parameter_values: list[TParamValueList] = []
     for p_name in param_names:
         p = search_space.parameters[p_name]
         # Validation

@@ -4,25 +4,38 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+
+from typing import cast
 
 import torch
 from ax.core.search_space import SearchSpaceDigest
 from ax.models.torch.cbo_sac import SACBO, SACGP
 from ax.utils.common.testutils import TestCase
-from ax.utils.testing.mock import fast_botorch_optimize
+from ax.utils.testing.mock import mock_botorch_optimize
+from botorch.models.contextual import LCEAGP
 from botorch.models.model_list_gp_regression import ModelListGP
-from botorch.utils.datasets import FixedNoiseDataset
+from botorch.utils.datasets import SupervisedDataset
 
 
 class SACBOTest(TestCase):
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_SACBO(self) -> None:
         train_X = torch.tensor(
             [[0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0], [2.0, 2.0, 2.0, 2.0]]
         )
         train_Y = torch.tensor([[1.0], [2.0], [3.0]])
         train_Yvar = 0.1 * torch.ones(3, 1)
-        dataset = FixedNoiseDataset(X=train_X, Y=train_Y, Yvar=train_Yvar)
+        feature_names = ["0", "1", "2", "3"]
+        metric_names = ["y"]
+        dataset = SupervisedDataset(
+            X=train_X,
+            Y=train_Y,
+            Yvar=train_Yvar,
+            feature_names=feature_names,
+            outcome_names=metric_names,
+        )
 
         # test setting attributes
         decomposition = {"1": ["0", "1"], "2": ["2", "3"]}
@@ -32,9 +45,8 @@ class SACBOTest(TestCase):
         # test fit
         m1.fit(
             datasets=[dataset],
-            metric_names=["y"],
             search_space_digest=SearchSpaceDigest(
-                feature_names=["0", "1", "2", "3"],
+                feature_names=feature_names,
                 bounds=[(0.0, 1.0) for _ in range(4)],
             ),
         )
@@ -47,7 +59,7 @@ class SACBOTest(TestCase):
             Yvars=[train_Yvar],
             task_features=[],
             fidelity_features=[],
-            metric_names=["y"],
+            metric_names=metric_names,
         )
         self.assertIsInstance(gp, SACGP)
 
@@ -70,21 +82,20 @@ class SACBOTest(TestCase):
         m2 = SACBO(decomposition={"1": ["x1", "x3"], "2": ["x2", "x4"]})
         m2.fit(
             datasets=[dataset],
-            metric_names=["y"],
             search_space_digest=SearchSpaceDigest(
                 feature_names=["x1", "x2", "x3", "x4"],
                 bounds=[(0.0, 1.0) for _ in range(4)],
             ),
         )
-        # pyre-fixme[16]: Optional type has no attribute `decomposition`.
-        self.assertDictEqual(m2.model.decomposition, {"1": [0, 2], "2": [1, 3]})
+        self.assertDictEqual(
+            cast(LCEAGP, m2.model).decomposition, {"1": [0, 2], "2": [1, 3]}
+        )
 
         # test decomposition validation in get_and_fit_model
         # the feature_names is not passed
         with self.assertRaises(ValueError):
             m2.fit(
                 datasets=[dataset],
-                metric_names=["y"],
                 search_space_digest=SearchSpaceDigest(
                     feature_names=[],
                     bounds=[(0.0, 1.0) for _ in range(4)],
@@ -95,7 +106,6 @@ class SACBOTest(TestCase):
         with self.assertRaises(AssertionError):
             m2.fit(
                 datasets=[dataset],
-                metric_names=["y"],
                 search_space_digest=SearchSpaceDigest(
                     feature_names=["x0", "x1", "x2", "x3"],
                     bounds=[(0.0, 1.0) for _ in range(4)],

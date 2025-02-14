@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from ax.core import (
     Arm,
     BatchTrial,
@@ -30,9 +32,14 @@ from ax.core import (
     SumConstraint,
     Trial,
 )
-from ax.modelbridge import Models
+from ax.modelbridge import Generators
 from ax.service import OptimizationLoop, optimize
 from ax.storage import json_load, json_save
+
+try:
+    pass
+except Exception:  # pragma: no cover
+    __version__ = "Unknown"
 
 
 __all__ = [
@@ -45,7 +52,7 @@ __all__ = [
     "FixedParameter",
     "GeneratorRun",
     "Metric",
-    "Models",
+    "Generators",
     "MultiObjective",
     "MultiObjectiveOptimizationConfig",
     "Objective",

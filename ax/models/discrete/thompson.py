@@ -4,20 +4,26 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import hashlib
 import json
-from typing import Dict, List, Optional, Tuple
+import warnings
+from collections.abc import Iterable, Mapping, Sequence
 
 import numpy as np
+import numpy.typing as npt
 from ax.core.types import TGenMetadata, TParamValue, TParamValueList
 from ax.exceptions.constants import TS_MIN_WEIGHT_ERROR, TS_NO_FEASIBLE_ARMS_ERROR
 from ax.exceptions.model import ModelError
-from ax.models.discrete_base import DiscreteModel
+from ax.models.discrete_base import DiscreteGenerator
 from ax.models.types import TConfig
 from ax.utils.common.docutils import copy_doc
 
+from pyre_extensions import assert_is_instance, none_throws
 
-class ThompsonSampler(DiscreteModel):
+
+class ThompsonSampler(DiscreteGenerator):
     """Generator for Thompson sampling.
 
     The generator performs Thompson sampling on the data passed in via `fit`.
@@ -28,7 +34,7 @@ class ThompsonSampler(DiscreteModel):
     def __init__(
         self,
         num_samples: int = 10000,
-        min_weight: Optional[float] = None,
+        min_weight: float | None = None,
         uniform_weights: bool = False,
     ) -> None:
         """
@@ -44,54 +50,63 @@ class ThompsonSampler(DiscreteModel):
         self.min_weight = min_weight
         self.uniform_weights = uniform_weights
 
-        # pyre-fixme[4]: Attribute must be annotated.
-        self.X = None
-        # pyre-fixme[4]: Attribute must be annotated.
-        self.Ys = None
-        # pyre-fixme[4]: Attribute must be annotated.
-        self.Yvars = None
-        # pyre-fixme[4]: Attribute must be annotated.
-        self.X_to_Ys_and_Yvars = None
+        self.X: Sequence[Sequence[TParamValue]] | None = None
+        self.Ys: Sequence[Sequence[float]] | None = None
+        self.Yvars: Sequence[Sequence[float]] | None = None
+        self.X_to_Ys_and_Yvars: (
+            list[dict[TParamValueList, tuple[float, float]]] | None
+        ) = None
 
-    @copy_doc(DiscreteModel.fit)
+    @copy_doc(DiscreteGenerator.fit)
     def fit(
         self,
-        Xs: List[List[TParamValueList]],
-        Ys: List[List[float]],
-        Yvars: List[List[float]],
-        parameter_values: List[TParamValueList],
-        outcome_names: List[str],
+        Xs: Sequence[Sequence[Sequence[TParamValue]]],
+        Ys: Sequence[Sequence[float]],
+        Yvars: Sequence[Sequence[float]],
+        parameter_values: Sequence[Sequence[TParamValue]],
+        outcome_names: Sequence[str],
     ) -> None:
         self.X = self._fit_X(Xs=Xs)
         self.Ys, self.Yvars = self._fit_Ys_and_Yvars(
             Ys=Ys, Yvars=Yvars, outcome_names=outcome_names
         )
         self.X_to_Ys_and_Yvars = self._fit_X_to_Ys_and_Yvars(
-            X=self.X, Ys=self.Ys, Yvars=self.Yvars
+            X=none_throws(self.X),
+            Ys=none_throws(self.Ys),
+            Yvars=none_throws(self.Yvars),
         )
 
-    @copy_doc(DiscreteModel.gen)
+    @copy_doc(DiscreteGenerator.gen)
     def gen(
         self,
         n: int,
-        parameter_values: List[TParamValueList],
-        objective_weights: Optional[np.ndarray],
-        outcome_constraints: Optional[Tuple[np.ndarray, np.ndarray]] = None,
-        fixed_features: Optional[Dict[int, TParamValue]] = None,
-        pending_observations: Optional[List[List[TParamValueList]]] = None,
-        model_gen_options: Optional[TConfig] = None,
-    ) -> Tuple[List[TParamValueList], List[float], TGenMetadata]:
+        parameter_values: Sequence[Sequence[TParamValue]],
+        objective_weights: npt.NDArray | None,
+        outcome_constraints: tuple[npt.NDArray, npt.NDArray] | None = None,
+        fixed_features: Mapping[int, TParamValue] | None = None,
+        pending_observations: Sequence[Sequence[Sequence[TParamValue]]] | None = None,
+        model_gen_options: TConfig | None = None,
+    ) -> tuple[list[Sequence[TParamValue]], list[float], TGenMetadata]:
+        if n <= 0:
+            # TODO: use more informative error types
+            raise ValueError("ThompsonSampler requires n > 0.")
         if objective_weights is None:
             raise ValueError("ThompsonSampler requires objective weights.")
 
-        arms = self.X
+        if np.sum(abs(objective_weights) > 0) > 1:
+            warnings.warn(
+                "In case of multi-objective adding metric values together might"
+                " not lead to a meaningful result.",
+                stacklevel=2,
+            )
+
+        arms = none_throws(self.X)
         k = len(arms)
 
         weights = self._generate_weights(
             objective_weights=objective_weights, outcome_constraints=outcome_constraints
         )
         min_weight = self.min_weight if self.min_weight is not None else 2.0 / k
-
         # Second entry is used for tie-breaking
         weighted_arms = [
             (weights[i], np.random.random(), arms[i])
@@ -107,7 +122,7 @@ class ThompsonSampler(DiscreteModel):
             )
 
         weighted_arms.sort(reverse=True)
-        top_weighted_arms = weighted_arms[:n] if n > 0 else weighted_arms
+        top_weighted_arms = weighted_arms[:n]
         top_arms = [arm for _, _, arm in top_weighted_arms]
         top_weights = [weight for weight, _, _ in top_weighted_arms]
 
@@ -115,19 +130,26 @@ class ThompsonSampler(DiscreteModel):
         if self.uniform_weights:
             top_weights = [1.0 for _ in top_weights]
         else:
-            top_weights = [
-                (x * len(top_weights)) / sum(top_weights) for x in top_weights
-            ]
-        return top_arms, top_weights, {"arms_to_weights": list(zip(arms, weights))}
+            top_weights = [(x * n) / sum(top_weights) for x in top_weights]
+        return (
+            top_arms,
+            top_weights,
+            {
+                "arms_to_weights": list(zip(arms, weights)),
+                "best_x": weighted_arms[0][2],
+            },
+        )
 
-    @copy_doc(DiscreteModel.predict)
-    def predict(self, X: List[TParamValueList]) -> Tuple[np.ndarray, np.ndarray]:
+    @copy_doc(DiscreteGenerator.predict)
+    def predict(
+        self, X: Sequence[Sequence[TParamValue]]
+    ) -> tuple[npt.NDArray, npt.NDArray]:
         n = len(X)  # number of parameterizations at which to make predictions
-        m = len(self.Ys)  # number of outcomes
+        m = len(none_throws(self.Ys))  # number of outcomes
         f = np.zeros((n, m))  # array of outcome predictions
         cov = np.zeros((n, m, m))  # array of predictive covariances
         predictX = [self._hash_TParamValueList(x) for x in X]
-        for i, X_to_Y_and_Yvar in enumerate(self.X_to_Ys_and_Yvars):
+        for i, X_to_Y_and_Yvar in enumerate(none_throws(self.X_to_Ys_and_Yvars)):
             # iterate through outcomes
             for j, x in enumerate(predictX):
                 # iterate through parameterizations at which to make predictions
@@ -135,14 +157,16 @@ class ThompsonSampler(DiscreteModel):
                     raise ValueError(
                         "ThompsonSampler does not support out-of-sample prediction."
                     )
-                f[j, i], cov[j, i, i] = X_to_Y_and_Yvar[x]
+                f[j, i], cov[j, i, i] = X_to_Y_and_Yvar[
+                    assert_is_instance(x, TParamValue)
+                ]
         return f, cov
 
     def _generate_weights(
         self,
-        objective_weights: np.ndarray,
-        outcome_constraints: Optional[Tuple[np.ndarray, np.ndarray]] = None,
-    ) -> List[float]:
+        objective_weights: npt.NDArray,
+        outcome_constraints: tuple[npt.NDArray, npt.NDArray] | None = None,
+    ) -> list[float]:
         samples, fraction_all_infeasible = self._produce_samples(
             num_samples=self.num_samples,
             objective_weights=objective_weights,
@@ -166,19 +190,19 @@ class ThompsonSampler(DiscreteModel):
             num_valid_samples = samples.shape[1]
 
         winner_indices = np.argmax(samples, axis=0)  # (num_samples,)
-        winner_counts = np.zeros(len(self.X))  # (k,)
+        winner_counts = np.zeros(len(none_throws(self.X)))  # (k,)
         for index in winner_indices:
             winner_counts[index] += 1
         weights = winner_counts / winner_counts.sum()
         return weights.tolist()
 
-    def _generate_samples_per_metric(self, num_samples: int) -> np.ndarray:
-        k = len(self.X)
+    def _generate_samples_per_metric(self, num_samples: int) -> npt.NDArray:
+        k = len(none_throws(self.X))
         samples_per_metric = np.zeros(
-            (k, num_samples, len(self.Ys))
+            (k, num_samples, len(none_throws(self.Ys)))
         )  # k x num_samples x m
-        for i, Y in enumerate(self.Ys):  # (k x 1)
-            Yvar = self.Yvars[i]  # (k x 1)
+        for i, Y in enumerate(none_throws(self.Ys)):  # (k x 1)
+            Yvar = none_throws(self.Yvars)[i]  # (k x 1)
             cov = np.diag(Yvar)  # (k x k)
             samples = np.random.multivariate_normal(
                 Y, cov, num_samples
@@ -189,10 +213,10 @@ class ThompsonSampler(DiscreteModel):
     def _produce_samples(
         self,
         num_samples: int,
-        objective_weights: np.ndarray,
-        outcome_constraints: Optional[Tuple[np.ndarray, np.ndarray]],
-    ) -> Tuple[np.ndarray, float]:
-        k = len(self.X)
+        objective_weights: npt.NDArray,
+        outcome_constraints: tuple[npt.NDArray, npt.NDArray] | None,
+    ) -> tuple[npt.NDArray, float]:
+        k = len(none_throws(self.X))
         samples_per_metric = self._generate_samples_per_metric(num_samples=num_samples)
 
         any_violation = np.zeros((k, num_samples), dtype=bool)  # (k x num_samples)
@@ -211,14 +235,14 @@ class ThompsonSampler(DiscreteModel):
         objective_values = np.dot(
             samples_per_metric, objective_weights
         )  # (k x num_samples)
-        objective_values[any_violation] = -np.Inf
+        objective_values[any_violation] = -np.inf
         best_arm = objective_values.max(axis=0)  # (num_samples,)
-        all_arms_infeasible = best_arm == -np.Inf  # (num_samples,)
+        all_arms_infeasible = best_arm == -np.inf  # (num_samples,)
         fraction_all_infeasible = all_arms_infeasible.mean()
         filtered_objective = objective_values[:, ~all_arms_infeasible]  # (k x ?)
         return filtered_objective, fraction_all_infeasible
 
-    def _validate_Xs(self, Xs: List[List[TParamValueList]]) -> None:
+    def _validate_Xs(self, Xs: Sequence[Sequence[Sequence[TParamValue]]]) -> None:
         """
         1. Require that all Xs have the same arms, i.e. we have observed
         all arms for all metrics. If so, we can safely use Xs[0] exclusively.
@@ -239,14 +263,19 @@ class ThompsonSampler(DiscreteModel):
                 "i.e. that there is only one observation per parameterization."
             )
 
-    def _fit_X(self, Xs: List[List[TParamValueList]]) -> List[TParamValueList]:
+    def _fit_X(
+        self, Xs: Sequence[Sequence[Sequence[TParamValue]]]
+    ) -> Sequence[Sequence[TParamValue]]:
         """After validation has been performed, it's safe to use Xs[0]."""
         self._validate_Xs(Xs=Xs)
         return Xs[0]
 
     def _fit_Ys_and_Yvars(
-        self, Ys: List[List[float]], Yvars: List[List[float]], outcome_names: List[str]
-    ) -> Tuple[List[List[float]], List[List[float]]]:
+        self,
+        Ys: Sequence[Sequence[float]],
+        Yvars: Sequence[Sequence[float]],
+        outcome_names: Sequence[str],
+    ) -> tuple[Sequence[Sequence[float]], Sequence[Sequence[float]]]:
         """For plain Thompson Sampling, there's nothing to be done here.
         EmpiricalBayesThompsonSampler will overwrite this method to perform
         shrinkage.
@@ -254,18 +283,21 @@ class ThompsonSampler(DiscreteModel):
         return Ys, Yvars
 
     def _fit_X_to_Ys_and_Yvars(
-        self, X: List[TParamValueList], Ys: List[List[float]], Yvars: List[List[float]]
-    ) -> List[Dict[TParamValueList, Tuple[float, float]]]:
+        self,
+        X: Sequence[Sequence[TParamValue]],
+        Ys: Sequence[Sequence[float]],
+        Yvars: Sequence[Sequence[float]],
+    ) -> list[dict[TParamValueList, tuple[float, float]]]:
         """Construct lists of mappings, one per outcome, of parameterizations
         to the a tuple of their mean and variance.
         """
         X_to_Ys_and_Yvars = []
         hashableX = [self._hash_TParamValueList(x) for x in X]
-        for (Y, Yvar) in zip(Ys, Yvars):
+        for Y, Yvar in zip(Ys, Yvars):
             X_to_Ys_and_Yvars.append(dict(zip(hashableX, zip(Y, Yvar))))
         return X_to_Ys_and_Yvars
 
-    def _hash_TParamValueList(self, x: TParamValueList) -> str:
+    def _hash_TParamValueList(self, x: Iterable[TParamValue]) -> str:
         """Hash a list of parameter values. This is safer than converting the
         list to a tuple because of int/floats.
         """

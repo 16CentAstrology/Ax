@@ -1,12 +1,12 @@
 {
   "API Comparison": [
     {
-      "id": "gpei_hartmann_loop",
-      "title": "Loop API"
+      "id": "gpei_hartmann_service",
+      "title": "[RECOMMENDED] Service API"
     },
     {
-      "id": "gpei_hartmann_service",
-      "title": "Service API"
+      "id": "gpei_hartmann_loop",
+      "title": "Loop API"
     },
     {
       "id": "gpei_hartmann_developer",
@@ -28,17 +28,17 @@
     },
     {
       "id": "modular_botax",
-      "title": "Modular `BoTorchModel`"
+      "title": "Modular `BoTorchGenerator`"
     }
   ],
   "Bayesian Optimization": [
     {
-      "id": "tune_cnn",
+      "id": "tune_cnn_service",
       "title": "Hyperparameter Optimization for PyTorch"
     },
     {
-      "id": "raytune_pytorch_cnn",
-      "title": "Hyperparameter Optimization via Raytune"
+      "id": "submitit",
+      "title": "Hyperparameter Optimization on SLURM via SubmitIt"
     },
     {
       "id": "multi_task",
@@ -57,9 +57,16 @@
       "title": "Fully Bayesian, High-Dimensional, Multi-Objective Optimization"
     },
     {
-      "dir": "early_stopping",
+      "id": "sebo",
+      "title": "Sparsity Exploration Bayesian Optimization (SEBO)"
+    },
+    {
       "id": "early_stopping",
       "title": "Trial-Level Early Stopping"
+    },
+    {
+      "id": "gss",
+      "title": "Global Stopping (Experiment-Level Early Stopping)"
     }
   ],
   "Field Experiments": [
@@ -68,9 +75,14 @@
       "title": "Bandit Optimization"
     },
     {
-      "dir": "human_in_the_loop",
       "id": "human_in_the_loop",
       "title": "Human-in-the-Loop Optimization"
+    }
+  ],
+  "Integrating External Strategies": [
+    {
+      "id": "external_generation_node",
+      "title": "RandomForest with ExternalGenerationNode"
     }
   ]
 }

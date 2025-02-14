@@ -4,20 +4,23 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import numbers
 import warnings
 from collections import OrderedDict
+from collections.abc import Callable, Iterable, Sequence
 
 from logging import Logger
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any
 
 import numpy as np
 import plotly.graph_objs as go
 from ax.core.data import Data
 from ax.core.experiment import Experiment
 from ax.core.observation import Observation, ObservationFeatures
-from ax.modelbridge.base import ModelBridge
-from ax.modelbridge.registry import Models
+from ax.modelbridge.base import Adapter
+from ax.modelbridge.registry import Generators
 from ax.plot.base import (
     AxPlotConfig,
     AxPlotTypes,
@@ -41,22 +44,22 @@ from ax.plot.helper import (
     TNullableGeneratorRunsDict,
 )
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast_optional
+from ax.utils.common.typeutils import assert_is_instance_optional
 from ax.utils.stats.statstools import relativize
 from plotly import subplots
 
 logger: Logger = get_logger(__name__)
 
 # type aliases
-Traces = List[Dict[str, Any]]
+Traces = list[dict[str, Any]]
 
 
 def _error_scatter_data(
-    arms: Iterable[Union[PlotInSampleArm, PlotOutOfSampleArm]],
+    arms: Iterable[PlotInSampleArm | PlotOutOfSampleArm],
     y_axis_var: PlotMetric,
-    x_axis_var: Optional[PlotMetric] = None,
-    status_quo_arm: Optional[PlotInSampleArm] = None,
-) -> Tuple[List[float], Optional[List[float]], List[float], List[float]]:
+    x_axis_var: PlotMetric | None = None,
+    status_quo_arm: PlotInSampleArm | None = None,
+) -> tuple[list[float], list[float] | None, list[float], list[float]]:
     y_metric_key = "y_hat" if y_axis_var.pred else "y"
     y_sd_key = "se_hat" if y_axis_var.pred else "se"
 
@@ -103,25 +106,25 @@ def _error_scatter_data(
 
 
 def _error_scatter_trace(
-    arms: Sequence[Union[PlotInSampleArm, PlotOutOfSampleArm]],
+    arms: Sequence[PlotInSampleArm | PlotOutOfSampleArm],
     y_axis_var: PlotMetric,
-    x_axis_var: Optional[PlotMetric] = None,
-    y_axis_label: Optional[str] = None,
-    x_axis_label: Optional[str] = None,
-    status_quo_arm: Optional[PlotInSampleArm] = None,
+    x_axis_var: PlotMetric | None = None,
+    y_axis_label: str | None = None,
+    x_axis_label: str | None = None,
+    status_quo_arm: PlotInSampleArm | None = None,
     show_CI: bool = True,
     name: str = "In-sample",
-    color: Tuple[int] = COLORS.STEELBLUE.value,
+    color: tuple[int] = COLORS.STEELBLUE.value,
     visible: bool = True,
-    legendgroup: Optional[str] = None,
+    legendgroup: str | None = None,
     showlegend: bool = True,
     hoverinfo: str = "text",
     show_arm_details_on_hover: bool = True,
     show_context: bool = False,
     arm_noun: str = "arm",
-    color_parameter: Optional[str] = None,
-    color_metric: Optional[str] = None,
-) -> Dict[str, Any]:
+    color_parameter: str | None = None,
+    color_metric: str | None = None,
+) -> dict[str, Any]:
     """Plot scatterplot with error bars.
 
     Args:
@@ -291,20 +294,21 @@ def _error_scatter_trace(
         trace.update(legendgroup=legendgroup)
     if showlegend is not None:
         trace.update(showlegend=showlegend)
+    # pyre-fixme[7]: Expected `Dict[str, typing.Any]` but got `Scatter`.
     return trace
 
 
 def _multiple_metric_traces(
-    model: ModelBridge,
+    model: Adapter,
     metric_x: str,
     metric_y: str,
     generator_runs_dict: TNullableGeneratorRunsDict,
     rel_x: bool,
     rel_y: bool,
-    fixed_features: Optional[ObservationFeatures] = None,
-    data_selector: Optional[Callable[[Observation], bool]] = None,
-    color_parameter: Optional[str] = None,
-    color_metric: Optional[str] = None,
+    fixed_features: ObservationFeatures | None = None,
+    data_selector: Callable[[Observation], bool] | None = None,
+    color_parameter: str | None = None,
+    color_metric: str | None = None,
 ) -> Traces:
     """Plot traces for multiple metrics given a model and metrics.
 
@@ -380,16 +384,16 @@ def _multiple_metric_traces(
 
 
 def plot_multiple_metrics(
-    model: ModelBridge,
+    model: Adapter,
     metric_x: str,
     metric_y: str,
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     rel_x: bool = True,
     rel_y: bool = True,
-    fixed_features: Optional[ObservationFeatures] = None,
-    data_selector: Optional[Callable[[Observation], bool]] = None,
-    color_parameter: Optional[str] = None,
-    color_metric: Optional[str] = None,
+    fixed_features: ObservationFeatures | None = None,
+    data_selector: Callable[[Observation], bool] | None = None,
+    color_parameter: str | None = None,
+    color_metric: str | None = None,
     **kwargs: Any,
 ) -> AxPlotConfig:
     """Plot raw values or predictions of two metrics for arms.
@@ -415,9 +419,13 @@ def plot_multiple_metrics(
         layout_offset_x = 0.15
     else:
         layout_offset_x = 0
-    rel = checked_cast_optional(bool, kwargs.get("rel"))
+    rel = assert_is_instance_optional(kwargs.get("rel"), bool)
     if rel is not None:
-        warnings.warn("Use `rel_x` and `rel_y` instead of `rel`.", DeprecationWarning)
+        warnings.warn(
+            "Use `rel_x` and `rel_y` instead of `rel`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         rel_x = rel
         rel_y = rel
     traces = _multiple_metric_traces(
@@ -528,21 +536,22 @@ def plot_multiple_metrics(
         legend={"x": 1 + layout_offset_x},
     )
     fig = go.Figure(data=traces, layout=layout)
+    # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got `Figure`.
     return AxPlotConfig(data=fig, plot_type=AxPlotTypes.GENERIC)
 
 
 def plot_objective_vs_constraints(
-    model: ModelBridge,
+    model: Adapter,
     objective: str,
-    subset_metrics: Optional[List[str]] = None,
+    subset_metrics: list[str] | None = None,
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     rel: bool = True,
-    infer_relative_constraints: Optional[bool] = False,
-    fixed_features: Optional[ObservationFeatures] = None,
-    data_selector: Optional[Callable[[Observation], bool]] = None,
-    color_parameter: Optional[str] = None,
-    color_metric: Optional[str] = None,
-    label_dict: Optional[Dict[str, str]] = None,
+    infer_relative_constraints: bool | None = False,
+    fixed_features: ObservationFeatures | None = None,
+    data_selector: Callable[[Observation], bool] | None = None,
+    color_parameter: str | None = None,
+    color_metric: str | None = None,
+    label_dict: dict[str, str] | None = None,
 ) -> AxPlotConfig:
     """Plot the tradeoff between an objective and all other metrics in a model.
 
@@ -765,10 +774,11 @@ def plot_objective_vs_constraints(
     )
 
     fig = go.Figure(data=plot_data, layout=layout)
+    # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got `Figure`.
     return AxPlotConfig(data=fig, plot_type=AxPlotTypes.GENERIC)
 
 
-def _replace_str(input_str: str, str_dict: Optional[Dict[str, str]] = None) -> str:
+def _replace_str(input_str: str, str_dict: dict[str, str] | None = None) -> str:
     """Utility function to replace a string based on a mapping dictionary.
 
     Args:
@@ -778,7 +788,7 @@ def _replace_str(input_str: str, str_dict: Optional[Dict[str, str]] = None) -> s
     return str_dict[input_str] if (str_dict and input_str in str_dict) else input_str
 
 
-def _check_label_lengths(labels: List[str]) -> None:
+def _check_label_lengths(labels: list[str]) -> None:
     """Utility function to check label length and provide a warning for long
        labels pointing to a mapping that can be used to override them.
 
@@ -797,11 +807,11 @@ def _check_label_lengths(labels: List[str]) -> None:
 
 
 def lattice_multiple_metrics(
-    model: ModelBridge,
+    model: Adapter,
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     rel: bool = True,
     show_arm_details_on_hover: bool = False,
-    data_selector: Optional[Callable[[Observation], bool]] = None,
+    data_selector: Callable[[Observation], bool] | None = None,
 ) -> AxPlotConfig:
     """Plot raw values or predictions of combinations of two metrics for arms.
 
@@ -1040,10 +1050,10 @@ def lattice_multiple_metrics(
     for i, o in enumerate(metrics):
         pos_x = len(metrics) * len(metrics) - len(metrics) + i + 1
         pos_y = 1 + (len(metrics) * i)
-        fig["layout"]["xaxis{}".format(pos_x)].update(
+        fig["layout"][f"xaxis{pos_x}"].update(
             title=_wrap_metric(o), titlefont={"size": 10}
         )
-        fig["layout"]["yaxis{}".format(pos_y)].update(
+        fig["layout"][f"yaxis{pos_y}"].update(
             title=_wrap_metric(o), titlefont={"size": 10}
         )
 
@@ -1061,12 +1071,13 @@ def lattice_multiple_metrics(
     for xaxis in boxplot_xaxes:
         fig["layout"][xaxis]["showticklabels"] = False
 
+    # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got `Figure`.
     return AxPlotConfig(data=fig, plot_type=AxPlotTypes.GENERIC)
 
 
 # Single metric fitted values
 def _single_metric_traces(
-    model: ModelBridge,
+    model: Adapter,
     metric: str,
     generator_runs_dict: TNullableGeneratorRunsDict,
     rel: bool,
@@ -1074,8 +1085,9 @@ def _single_metric_traces(
     showlegend: bool = True,
     show_CI: bool = True,
     arm_noun: str = "arm",
-    fixed_features: Optional[ObservationFeatures] = None,
-    data_selector: Optional[Callable[[Observation], bool]] = None,
+    fixed_features: ObservationFeatures | None = None,
+    data_selector: Callable[[Observation], bool] | None = None,
+    scalarized_metric_config: list[dict[str, Any]] | None = None,
 ) -> Traces:
     """Plot scatterplots with errors for a single metric (y-axis).
 
@@ -1094,6 +1106,11 @@ def _single_metric_traces(
         arm_noun: noun to use instead of "arm" (e.g. group)
         fixed_features: Fixed features to use when making model predictions.
         data_selector: Function for selecting observations for plotting.
+        scalarized_metric_config: An optional list of dicts specifying how to aggregate
+            multiple metrics into a single scalarized metric. For each dict, the key is
+            the name of the new scalarized metric, and the value is a dictionary mapping
+            each metric to its weight. e.g.
+            {"name": "metric1:agg", "weight": {"metric1_c1": 0.5, "metric1_c2": 0.5}}.
     """
     plot_data, _, _ = get_plot_data(
         model,
@@ -1101,6 +1118,7 @@ def _single_metric_traces(
         {metric},
         fixed_features=fixed_features,
         data_selector=data_selector,
+        scalarized_metric_config=scalarized_metric_config,
     )
 
     status_quo_arm = (
@@ -1146,14 +1164,15 @@ def _single_metric_traces(
 
 
 def plot_fitted(
-    model: ModelBridge,
+    model: Adapter,
     metric: str,
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     rel: bool = True,
-    custom_arm_order: Optional[List[str]] = None,
+    custom_arm_order: list[str] | None = None,
     custom_arm_order_name: str = "Custom",
     show_CI: bool = True,
-    data_selector: Optional[Callable[[Observation], bool]] = None,
+    data_selector: Callable[[Observation], bool] | None = None,
+    scalarized_metric_config: list[dict[str, Any]] | None = None,
 ) -> AxPlotConfig:
     """Plot fitted metrics.
 
@@ -1170,6 +1189,11 @@ def plot_fitted(
             show in the ordering dropdown. Default is 'Custom'.
         show_CI: if True, render confidence intervals.
         data_selector: Function for selecting observations for plotting.
+        scalarized_metric_config: An optional list of dicts specifying how to aggregate
+            multiple metrics into a single scalarized metric. For each dict, the key is
+            the name of the new scalarized metric, and the value is a dictionary mapping
+            each metric to its weight. e.g.
+            {"name": "metric1:agg", "weight": {"metric1_c1": 0.5, "metric1_c2": 0.5}}.
     """
     traces = _single_metric_traces(
         model,
@@ -1178,6 +1202,7 @@ def plot_fitted(
         rel,
         show_CI=show_CI,
         data_selector=data_selector,
+        scalarized_metric_config=scalarized_metric_config,
     )
 
     # order arm name sorting arm numbers within batch
@@ -1270,19 +1295,22 @@ def plot_fitted(
     )
 
     fig = go.Figure(data=traces, layout=layout)
+    # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got `Figure`.
     return AxPlotConfig(data=fig, plot_type=AxPlotTypes.GENERIC)
 
 
 def tile_fitted(
-    model: ModelBridge,
+    model: Adapter,
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     rel: bool = True,
     show_arm_details_on_hover: bool = False,
     show_CI: bool = True,
     arm_noun: str = "arm",
-    metrics: Optional[List[str]] = None,
-    fixed_features: Optional[ObservationFeatures] = None,
-    data_selector: Optional[Callable[[Observation], bool]] = None,
+    metrics: list[str] | None = None,
+    fixed_features: ObservationFeatures | None = None,
+    data_selector: Callable[[Observation], bool] | None = None,
+    scalarized_metric_config: list[dict[str, Any]] | None = None,
+    label_dict: dict[str, str] | None = None,
 ) -> AxPlotConfig:
     """Tile version of fitted outcome plots.
 
@@ -1298,26 +1326,36 @@ def tile_fitted(
         metrics: List of metric names to restrict to when plotting.
         fixed_features: Fixed features to use when making model predictions.
         data_selector: Function for selecting observations for plotting.
+        scalarized_metric_config: An optional list of dicts specifying how to aggregate
+            multiple metrics into a single scalarized metric. For each dict, the key is
+            the name of the new scalarized metric, and the value is a dictionary mapping
+            each metric to its weight. e.g.
+            {"name": "metric1:agg", "weight": {"metric1_c1": 0.5, "metric1_c2": 0.5}}.
+        label_dict: A dictionary that maps the label to an alias to be used in the plot.
     """
     metrics = metrics or list(model.metric_names)
     nrows = int(np.ceil(len(metrics) / 2))
     ncols = min(len(metrics), 2)
 
     # make subplots (plot per row)
+    if label_dict is None:
+        subplot_titles = metrics
+    else:
+        subplot_titles = [label_dict.get(metric, metric) for metric in metrics]
     fig = subplots.make_subplots(
         rows=nrows,
         cols=ncols,
         print_grid=False,
         shared_xaxes=False,
         shared_yaxes=False,
-        subplot_titles=tuple(metrics),
+        subplot_titles=tuple(subplot_titles),
         horizontal_spacing=0.05,
         vertical_spacing=0.30 / nrows,
     )
 
-    name_order_args: Dict[str, Any] = {}
-    name_order_axes: Dict[str, Dict[str, Any]] = {}
-    effect_order_args: Dict[str, Any] = {}
+    name_order_args: dict[str, Any] = {}
+    name_order_axes: dict[str, dict[str, Any]] = {}
+    effect_order_args: dict[str, Any] = {}
 
     for i, metric in enumerate(metrics):
         data = _single_metric_traces(
@@ -1331,6 +1369,7 @@ def tile_fitted(
             arm_noun=arm_noun,
             fixed_features=fixed_features,
             data_selector=data_selector,
+            scalarized_metric_config=scalarized_metric_config,
         )
 
         # order arm name sorting arm numbers within batch
@@ -1355,16 +1394,16 @@ def tile_fitted(
         # xaxis1, xaxis2, xaxis3, etc. Note the discrepancy for the initial
         # axis.
         label = "" if i == 0 else i + 1
-        name_order_args["xaxis{}.categoryorder".format(label)] = "array"
-        name_order_args["xaxis{}.categoryarray".format(label)] = names_by_arm
-        effect_order_args["xaxis{}.categoryorder".format(label)] = "array"
-        effect_order_args["xaxis{}.categoryarray".format(label)] = names_by_effect
-        name_order_axes["xaxis{}".format(i + 1)] = {
+        name_order_args[f"xaxis{label}.categoryorder"] = "array"
+        name_order_args[f"xaxis{label}.categoryarray"] = names_by_arm
+        effect_order_args[f"xaxis{label}.categoryorder"] = "array"
+        effect_order_args[f"xaxis{label}.categoryarray"] = names_by_effect
+        name_order_axes[f"xaxis{i + 1}"] = {
             "categoryorder": "array",
             "categoryarray": names_by_arm,
             "type": "category",
         }
-        name_order_axes["yaxis{}".format(i + 1)] = {
+        name_order_axes[f"yaxis{i + 1}"] = {
             "ticksuffix": "%" if rel else "",
             "zerolinecolor": "red",
         }
@@ -1379,8 +1418,8 @@ def tile_fitted(
     # if odd number of plots, need to manually remove the last blank subplot
     # generated by `subplots.make_subplots`
     if len(metrics) % 2 == 1:
-        fig["layout"].pop("xaxis{}".format(nrows * ncols))
-        fig["layout"].pop("yaxis{}".format(nrows * ncols))
+        fig["layout"].pop(f"xaxis{nrows * ncols}")
+        fig["layout"].pop(f"yaxis{nrows * ncols}")
 
     # allocate 400 px per plot
     fig["layout"].update(
@@ -1433,21 +1472,23 @@ def tile_fitted(
         },
     )
 
+    # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got `Figure`.
     fig = resize_subtitles(figure=fig, size=10)
     return AxPlotConfig(data=fig, plot_type=AxPlotTypes.GENERIC)
 
 
 def interact_fitted_plotly(
-    model: ModelBridge,
+    model: Adapter,
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     rel: bool = True,
     show_arm_details_on_hover: bool = True,
     show_CI: bool = True,
     arm_noun: str = "arm",
-    metrics: Optional[List[str]] = None,
-    fixed_features: Optional[ObservationFeatures] = None,
-    data_selector: Optional[Callable[[Observation], bool]] = None,
-    label_dict: Optional[Dict[str, str]] = None,
+    metrics: list[str] | None = None,
+    fixed_features: ObservationFeatures | None = None,
+    data_selector: Callable[[Observation], bool] | None = None,
+    label_dict: dict[str, str] | None = None,
+    scalarized_metric_config: list[dict[str, Any]] | None = None,
 ) -> go.Figure:
     """Interactive fitted outcome plots for each arm used in fitting the model.
 
@@ -1467,6 +1508,11 @@ def interact_fitted_plotly(
         data_selector: Function for selecting observations for plotting.
         label_dict: A dictionary that maps the label to
             an alias to be used in the plot.
+        scalarized_metric_config: An optional list of dicts specifying how to aggregate
+            multiple metrics into a single scalarized metric. For each dict, the key is
+            the name of the new scalarized metric, and the value is a dictionary mapping
+            each metric to its weight. e.g.
+            {"name": "metric1:agg", "weight": {"metric1_c1": 0.5, "metric1_c2": 0.5}}.
     """
     traces_per_metric = (
         1 if generator_runs_dict is None else len(generator_runs_dict) + 1
@@ -1478,7 +1524,12 @@ def interact_fitted_plotly(
     traces = []
     dropdown = []
 
-    for i, metric in enumerate(metrics):
+    if scalarized_metric_config is not None:
+        all_metrics = metrics + [agg["name"] for agg in scalarized_metric_config]
+    else:
+        all_metrics = metrics
+
+    for i, metric in enumerate(all_metrics):
         data = _single_metric_traces(
             model,
             metric,
@@ -1490,6 +1541,7 @@ def interact_fitted_plotly(
             arm_noun=arm_noun,
             fixed_features=fixed_features,
             data_selector=data_selector,
+            scalarized_metric_config=scalarized_metric_config,
         )
 
         for d in data:
@@ -1498,7 +1550,7 @@ def interact_fitted_plotly(
 
         # only the first two traces are visible (corresponding to first outcome
         # in dropdown)
-        is_visible = [False] * (len(metrics) * traces_per_metric)
+        is_visible = [False] * (len(all_metrics) * traces_per_metric)
         for j in range((traces_per_metric * i), (traces_per_metric * (i + 1))):
             is_visible[j] = True
 
@@ -1506,7 +1558,10 @@ def interact_fitted_plotly(
         dropdown.append(
             {
                 "args": ["visible", is_visible],
-                "label": _replace_str(metric, label_dict),
+                "label": _replace_str(
+                    metric,
+                    label_dict,
+                ),
                 "method": "restyle",
             }
         )
@@ -1571,16 +1626,17 @@ def interact_fitted_plotly(
 
 
 def interact_fitted(
-    model: ModelBridge,
+    model: Adapter,
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     rel: bool = True,
     show_arm_details_on_hover: bool = True,
     show_CI: bool = True,
     arm_noun: str = "arm",
-    metrics: Optional[List[str]] = None,
-    fixed_features: Optional[ObservationFeatures] = None,
-    data_selector: Optional[Callable[[Observation], bool]] = None,
-    label_dict: Optional[Dict[str, str]] = None,
+    metrics: list[str] | None = None,
+    fixed_features: ObservationFeatures | None = None,
+    data_selector: Callable[[Observation], bool] | None = None,
+    label_dict: dict[str, str] | None = None,
+    scalarized_metric_config: list[dict[str, Any]] | None = None,
 ) -> AxPlotConfig:
     """Interactive fitted outcome plots for each arm used in fitting the model.
 
@@ -1600,9 +1656,16 @@ def interact_fitted(
         data_selector: Function for selecting observations for plotting.
         label_dict: A dictionary that maps the label to
             an alias to be used in the plot.
+        scalarized_metric_config: An optional list of dicts specifying how to aggregate
+            multiple metrics into a single scalarized metric. For each dict, the key is
+            the name of the new scalarized metric, and the value is a dictionary mapping
+            each metric to its weight. e.g.
+            {"name": "metric1:agg", "weight": {"metric1_c1": 0.5, "metric1_c2": 0.5}}.
     """
 
     return AxPlotConfig(
+        # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got
+        #  `Figure`.
         data=interact_fitted_plotly(
             model=model,
             generator_runs_dict=generator_runs_dict,
@@ -1614,6 +1677,7 @@ def interact_fitted(
             fixed_features=fixed_features,
             data_selector=data_selector,
             label_dict=label_dict,
+            scalarized_metric_config=scalarized_metric_config,
         ),
         plot_type=AxPlotTypes.GENERIC,
     )
@@ -1621,10 +1685,12 @@ def interact_fitted(
 
 def tile_observations(
     experiment: Experiment,
-    data: Optional[Data] = None,
+    data: Data | None = None,
     rel: bool = True,
-    metrics: Optional[List[str]] = None,
-    arm_names: Optional[List[str]] = None,
+    metrics: list[str] | None = None,
+    arm_names: list[str] | None = None,
+    arm_noun: str = "arm",
+    label_dict: dict[str, str] | None = None,
 ) -> AxPlotConfig:
     """
     Tiled plot with all observed outcomes.
@@ -1640,6 +1706,8 @@ def tile_observations(
         rel: Plot relative values, if experiment has status quo.
         metrics: Limit results to this set of metrics.
         arm_names: Limit results to this set of arms.
+        arm_noun: Noun to use instead of "arm".
+        label_dict: A dictionary that maps the label to an alias to be used in the plot.
 
     Returns: Plot config for the plot.
     """
@@ -1647,7 +1715,7 @@ def tile_observations(
         data = experiment.fetch_data()
     if arm_names is not None:
         data = Data(data.df[data.df["arm_name"].isin(arm_names)])
-    m_ts = Models.THOMPSON(
+    m_ts = Generators.THOMPSON(
         data=data,
         search_space=experiment.search_space,
         experiment=experiment,
@@ -1656,4 +1724,6 @@ def tile_observations(
         model=m_ts,
         rel=rel and (experiment.status_quo is not None),
         metrics=metrics,
+        arm_noun=arm_noun,
+        label_dict=label_dict,
     )

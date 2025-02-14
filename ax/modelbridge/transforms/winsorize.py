@@ -4,12 +4,15 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import warnings
 from logging import Logger
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Union
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
-from ax.core.objective import ScalarizedObjective
+import numpy.typing as npt
+from ax.core.objective import MultiObjective, ScalarizedObjective
 from ax.core.observation import Observation, ObservationData
 from ax.core.optimization_config import (
     MultiObjectiveOptimizationConfig,
@@ -30,18 +33,18 @@ from ax.modelbridge.transforms.utils import (
 )
 from ax.models.types import TConfig, WinsorizationConfig
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast
+from pyre_extensions import assert_is_instance
 
 if TYPE_CHECKING:
     # import as module to make sphinx-autodoc-typehints happy
-    from ax import modelbridge as modelbridge_module  # noqa F401  # pragma: no cover
+    from ax import modelbridge as modelbridge_module  # noqa F401
 
 logger: Logger = get_logger(__name__)
 
 
 OLD_KEYS = ["winsorization_lower", "winsorization_upper", "percentile_bounds"]
 AUTO_WINS_QUANTILE = -1  # This shouldn't be in the [0, 1] range
-DEFAULT_CUTOFFS: Tuple[float, float] = (-float("inf"), float("inf"))
+DEFAULT_CUTOFFS: tuple[float, float] = (-float("inf"), float("inf"))
 
 
 class Winsorize(Transform):
@@ -86,14 +89,14 @@ class Winsorize(Transform):
     the optimization config.
     """
 
-    cutoffs: Dict[str, Tuple[float, float]]
+    cutoffs: dict[str, tuple[float, float]]
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[List[Observation]] = None,
-        modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
+        modelbridge: Optional["modelbridge_module.base.Adapter"] = None,
+        config: TConfig | None = None,
     ) -> None:
         if observations is None or len(observations) == 0:
             raise DataRequiredError("`Winsorize` transform requires non-empty data.")
@@ -153,12 +156,12 @@ class Winsorize(Transform):
 
     def _transform_observation_data(
         self,
-        observation_data: List[ObservationData],
-    ) -> List[ObservationData]:
+        observation_data: list[ObservationData],
+    ) -> list[ObservationData]:
         """Winsorize observation data in place."""
         for obsd in observation_data:
             for idx, metric_name in enumerate(obsd.metric_names):
-                if metric_name not in self.cutoffs:  # pragma: no cover
+                if metric_name not in self.cutoffs:
                     raise ValueError(f"Cannot winsorize unknown metric {metric_name}")
                 # Clip on the winsorization bounds.
                 obsd.means[idx] = max(obsd.means[idx], self.cutoffs[metric_name][0])
@@ -168,13 +171,13 @@ class Winsorize(Transform):
 
 def _get_cutoffs(
     metric_name: str,
-    metric_values: List[float],
-    winsorization_config: Union[WinsorizationConfig, Dict[str, WinsorizationConfig]],
-    modelbridge: Optional["modelbridge_module.base.ModelBridge"],
-    observations: Optional[List[Observation]],
-    optimization_config: Optional[OptimizationConfig],
+    metric_values: list[float],
+    winsorization_config: WinsorizationConfig | dict[str, WinsorizationConfig],
+    modelbridge: Optional["modelbridge_module.base.Adapter"],
+    observations: list[Observation] | None,
+    optimization_config: OptimizationConfig | None,
     use_raw_sq: bool,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     # (1) Use the same config for all metrics if one WinsorizationConfig was specified
     if isinstance(winsorization_config, WinsorizationConfig):
         return _quantiles_to_cutoffs(
@@ -188,7 +191,7 @@ def _get_cutoffs(
     if isinstance(winsorization_config, dict) and metric_name in winsorization_config:
         metric_config = winsorization_config[metric_name]
         if not isinstance(metric_config, WinsorizationConfig):
-            raise UserInputError(  # pragma: no cover
+            raise UserInputError(
                 "Expected winsorization config of type "
                 f"`WinsorizationConfig` but got {metric_config} of type "
                 f"{type(metric_config)} for metric {metric_name}."
@@ -229,14 +232,18 @@ def _get_cutoffs(
             metric_values=metric_values,
         )
 
-    # Don't winsorize a ScalarizedObjective
+    # Make sure we winsorize from the correct direction if a `ScalarizedObjective`.
     if isinstance(optimization_config.objective, ScalarizedObjective):
-        warnings.warn(
-            "Automatic winsorization isn't supported for ScalarizedObjective. "
-            "Specify the winsorization settings manually if you want to "
-            f"winsorize metric {metric_name}."
+        objective = assert_is_instance(
+            optimization_config.objective, ScalarizedObjective
         )
-        return DEFAULT_CUTOFFS
+        weight = [w for m, w in objective.metric_weights if m.name == metric_name][0]
+        # Winsorize from above if the weight is positive and minimize is `True` or the
+        # weight is negative and minimize is `False`.
+        return _get_auto_winsorization_cutoffs_single_objective(
+            metric_values=metric_values,
+            minimize=objective.minimize if weight >= 0 else not objective.minimize,
+        )
 
     # Single-objective
     if not optimization_config.is_moo_problem:
@@ -256,13 +263,13 @@ def _get_cutoffs(
 def _get_auto_winsorization_cutoffs_multi_objective(
     optimization_config: OptimizationConfig,
     metric_name: str,
-    metric_values: List[float],
-) -> Tuple[float, float]:
+    metric_values: list[float],
+) -> tuple[float, float]:
     # We approach a multi-objective metric the same as output constraints. It may be
     # worth investigating setting the winsorization cutoffs based on the Pareto
     # frontier in the future.
-    optimization_config = checked_cast(
-        MultiObjectiveOptimizationConfig, optimization_config
+    optimization_config = assert_is_instance(
+        optimization_config, MultiObjectiveOptimizationConfig
     )
     objective_threshold = _get_objective_threshold_from_moo_config(
         optimization_config=optimization_config, metric_name=metric_name
@@ -272,19 +279,29 @@ def _get_auto_winsorization_cutoffs_multi_objective(
             metric_values=metric_values,
             outcome_constraints=objective_threshold,
         )
-    warnings.warn(
-        "Automatic winsorization isn't supported for an objective in `MultiObjective` "
-        "without objective thresholds. Specify the winsorization settings manually if "
-        f"you want to winsorize metric {metric_name}."
-    )
-    return DEFAULT_CUTOFFS  # Don't winsorize if there is no threshold
+    else:
+        warnings.warn(
+            "Encountered a `MultiObjective` without objective thresholds. We will "
+            "winsorize each objective separately. We strongly recommend specifying "
+            "the objective thresholds when using multi-objective optimization."
+        )
+        objectives = assert_is_instance(optimization_config.objective, MultiObjective)
+        minimize = [
+            objective.minimize
+            for objective in objectives.objectives
+            if objective.metric.name == metric_name
+        ][0]
+        return _get_auto_winsorization_cutoffs_single_objective(
+            metric_values=metric_values,
+            minimize=minimize,
+        )
 
 
 def _obtain_cutoffs_from_outcome_constraints(
     optimization_config: OptimizationConfig,
     metric_name: str,
-    metric_values: List[float],
-) -> Tuple[float, float]:
+    metric_values: list[float],
+) -> tuple[float, float]:
     """Get all outcome constraints (non-scalarized) for a given metric."""
     # Check for scalarized outcome constraints for the given metric
     if any(
@@ -310,7 +327,7 @@ def _obtain_cutoffs_from_outcome_constraints(
 
 def _get_non_scalarized_outcome_constraints(
     optimization_config: OptimizationConfig, metric_name: str
-) -> List[OutcomeConstraint]:
+) -> list[OutcomeConstraint]:
     return [
         oc
         for oc in optimization_config.outcome_constraints
@@ -321,7 +338,7 @@ def _get_non_scalarized_outcome_constraints(
 
 def _get_objective_threshold_from_moo_config(
     optimization_config: MultiObjectiveOptimizationConfig, metric_name: str
-) -> List[ObjectiveThreshold]:
+) -> list[ObjectiveThreshold]:
     """Get the non-relative objective threshold for a given metric."""
     return [
         ot
@@ -330,20 +347,20 @@ def _get_objective_threshold_from_moo_config(
     ]
 
 
-def _get_tukey_cutoffs(Y: np.ndarray, lower: bool) -> float:
+def _get_tukey_cutoffs(Y: npt.NDArray, lower: bool) -> float:
     """Compute winsorization cutoffs similarly to Tukey boxplots.
 
     See https://mathworld.wolfram.com/Box-and-WhiskerPlot.html for more details.
     """
-    q1 = np.percentile(Y, q=25, interpolation="lower")
-    q3 = np.percentile(Y, q=75, interpolation="higher")
+    q1 = np.percentile(Y, q=25, method="lower")
+    q3 = np.percentile(Y, q=75, method="higher")
     iqr = q3 - q1
     return q1 - 1.5 * iqr if lower else q3 + 1.5 * iqr
 
 
 def _get_auto_winsorization_cutoffs_single_objective(
-    metric_values: List[float], minimize: bool
-) -> Tuple[float, float]:
+    metric_values: list[float], minimize: bool
+) -> tuple[float, float]:
     """Automatic winsorization for a single objective.
 
     We use a heuristic similar to what is used for Tukey box-plots in order to determine
@@ -358,9 +375,9 @@ def _get_auto_winsorization_cutoffs_single_objective(
 
 
 def _get_auto_winsorization_cutoffs_outcome_constraint(
-    metric_values: List[float],
-    outcome_constraints: Union[List[ObjectiveThreshold], List[OutcomeConstraint]],
-) -> Tuple[float, float]:
+    metric_values: list[float],
+    outcome_constraints: list[ObjectiveThreshold] | list[OutcomeConstraint],
+) -> tuple[float, float]:
     """Automatic winsorization to an outcome constraint.
 
     We need to be careful here so we don't make infeasible points feasible.
@@ -371,7 +388,10 @@ def _get_auto_winsorization_cutoffs_outcome_constraint(
     with a GEQ constraint.
     """
     Y = np.array(metric_values)
+    # TODO: replace interpolation->method once it becomes standard.
+    # pyre-fixme[28]: Unexpected keyword argument `interpolation`.
     q1 = np.percentile(Y, q=25, interpolation="lower")
+    # pyre-fixme[28]: Unexpected keyword argument `interpolation`.
     q3 = np.percentile(Y, q=75, interpolation="higher")
     lower_cutoff, upper_cutoff = DEFAULT_CUTOFFS
     for oc in outcome_constraints:
@@ -381,17 +401,15 @@ def _get_auto_winsorization_cutoffs_outcome_constraint(
         elif oc.op == ComparisonOp.GEQ:
             lower_cutoff = min(q1, bnd) - 1.5 * (q3 - min(q1, bnd))
         else:
-            raise ValueError(  # pragma: no cover
-                "Exected outcome_constraint to use operator LEQ or GEQ"
-            )
+            raise ValueError("Exected outcome_constraint to use operator LEQ or GEQ")
     return lower_cutoff, upper_cutoff
 
 
 def _quantiles_to_cutoffs(
     metric_name: str,
-    metric_values: List[float],
+    metric_values: list[float],
     metric_config: WinsorizationConfig,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """Compute winsorization cutoffs from a config and values."""
     Y = np.array(metric_values)
     lower = metric_config.lower_quantile_margin or 0.0
@@ -403,7 +421,7 @@ def _quantiles_to_cutoffs(
         and upper != AUTO_WINS_QUANTILE
         and lower >= 1 - upper
     ):
-        raise ValueError(  # pragma: no cover
+        raise ValueError(
             f"Lower bound: {lower} was greater than the inverse of the "
             f"upper bound: {1 - upper} for metric {metric_name}. Decrease "
             f"one or both of `lower_quantile_margin` and "
@@ -414,6 +432,7 @@ def _quantiles_to_cutoffs(
     elif lower == 0.0:  # Use the default cutoff if there is no winsorization
         cutoff_l = DEFAULT_CUTOFFS[0]
     else:
+        # pyre-fixme[28]: Unexpected keyword argument `interpolation`.
         cutoff_l = np.percentile(Y, lower * 100, interpolation="lower")
 
     if upper == AUTO_WINS_QUANTILE:
@@ -421,6 +440,7 @@ def _quantiles_to_cutoffs(
     elif upper == 0.0:  # Use the default cutoff if there is no winsorization
         cutoff_u = DEFAULT_CUTOFFS[1]
     else:
+        # pyre-fixme[28]: Unexpected keyword argument `interpolation`.
         cutoff_u = np.percentile(Y, (1 - upper) * 100, interpolation="higher")
 
     cutoff_l = min(cutoff_l, bnd_l) if bnd_l is not None else cutoff_l
@@ -430,15 +450,17 @@ def _quantiles_to_cutoffs(
 
 def _get_cutoffs_from_legacy_transform_config(
     metric_name: str,
-    metric_values: List[float],
+    metric_values: list[float],
     transform_config: TConfig,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     winsorization_config = WinsorizationConfig()
     if "winsorization_lower" in transform_config:
         winsorization_lower = transform_config["winsorization_lower"]
         if isinstance(winsorization_lower, dict):
             if metric_name in winsorization_lower:
                 winsorization_config.lower_quantile_margin = winsorization_lower[
+                    # pyre-fixme [6]: In call `dict.__getitem__`, for 1st positional
+                    # argument, expected `int` but got `str`.
                     metric_name
                 ]
         elif isinstance(winsorization_lower, (int, float)):
@@ -448,6 +470,8 @@ def _get_cutoffs_from_legacy_transform_config(
         if isinstance(winsorization_upper, dict):
             if metric_name in winsorization_upper:
                 winsorization_config.upper_quantile_margin = winsorization_upper[
+                    # pyre-fixme [6]: In call `dict.__getitem__`, for 1st positional
+                    # argument, expected `int` but got `str`.
                     metric_name
                 ]
         elif isinstance(winsorization_upper, (int, float)):
@@ -457,9 +481,11 @@ def _get_cutoffs_from_legacy_transform_config(
         output_percentile_bounds = (None, None)
         if isinstance(percentile_bounds, dict):
             if metric_name in percentile_bounds:
+                # pyre-fixme [6]: In call `dict.__getitem__`, for 1st positional
+                # argument, expected `int` but got `str`.
                 output_percentile_bounds = percentile_bounds[metric_name]
-        elif isinstance(percentile_bounds, tuple):  # pragma: no cover
-            output_percentile_bounds = percentile_bounds  # pragma: no cover
+        elif isinstance(percentile_bounds, tuple):
+            output_percentile_bounds = percentile_bounds
         if len(output_percentile_bounds) != 2 or not all(
             isinstance(pb, (int, float)) or pb is None
             for pb in output_percentile_bounds

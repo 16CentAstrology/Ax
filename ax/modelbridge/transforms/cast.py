@@ -4,17 +4,20 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import List, Optional, TYPE_CHECKING
+# pyre-strict
+
+from typing import Optional, TYPE_CHECKING
 
 from ax.core.observation import Observation, ObservationFeatures
 from ax.core.search_space import HierarchicalSearchSpace, SearchSpace
+from ax.exceptions.core import UserInputError
 from ax.modelbridge.transforms.base import Transform
 from ax.models.types import TConfig
-from ax.utils.common.typeutils import checked_cast, not_none
+from pyre_extensions import assert_is_instance, none_throws
 
 if TYPE_CHECKING:
     # import as module to make sphinx-autodoc-typehints happy
-    from ax import modelbridge as modelbridge_module  # noqa F401  # pragma: no cover
+    from ax import modelbridge as modelbridge_module  # noqa F401
 
 
 class Cast(Transform):
@@ -39,15 +42,34 @@ class Cast(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[List[Observation]] = None,
-        modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
+        modelbridge: Optional["modelbridge_module.base.Adapter"] = None,
+        config: TConfig | None = None,
     ) -> None:
-        self.search_space: SearchSpace = not_none(search_space).clone()
-        self.flatten_hss: bool = (
-            config is None or checked_cast(bool, config.get("flatten_hss", True))
-        ) and isinstance(search_space, HierarchicalSearchSpace)
+        self.search_space: SearchSpace = none_throws(search_space).clone()
+        config = (config or {}).copy()
+        self.flatten_hss: bool = assert_is_instance(
+            config.pop(
+                "flatten_hss", isinstance(search_space, HierarchicalSearchSpace)
+            ),
+            bool,
+        )
+        self.inject_dummy_values_to_complete_flat_parameterization: bool = (
+            assert_is_instance(
+                config.pop(
+                    "inject_dummy_values_to_complete_flat_parameterization", True
+                ),
+                bool,
+            )
+        )
+        self.use_random_dummy_values: bool = assert_is_instance(
+            config.pop("use_random_dummy_values", False), bool
+        )
+        if config:
+            raise UserInputError(
+                f"Unexpected config parameters for `Cast` transform: {config}."
+            )
 
     def _transform_search_space(self, search_space: SearchSpace) -> SearchSpace:
         """Flattens the hierarchical search space and returns the flat
@@ -66,11 +88,11 @@ class Cast(Transform):
         """
         if not self.flatten_hss:
             return search_space
-        return checked_cast(HierarchicalSearchSpace, search_space).flatten()
+        return assert_is_instance(search_space, HierarchicalSearchSpace).flatten()
 
     def transform_observation_features(
-        self, observation_features: List[ObservationFeatures]
-    ) -> List[ObservationFeatures]:
+        self, observation_features: list[ObservationFeatures]
+    ) -> list[ObservationFeatures]:
         """Transform observation features by adding parameter values that
         were removed during casting of observation features to hierarchical
         search space.
@@ -86,15 +108,21 @@ class Cast(Transform):
         # got removed during casting to HSS as they were not applicable under the
         # hierarchical structure of the search space.
         return [
-            checked_cast(
-                HierarchicalSearchSpace, self.search_space
-            ).flatten_observation_features(observation_features=obs_feats)
+            assert_is_instance(
+                self.search_space, HierarchicalSearchSpace
+            ).flatten_observation_features(
+                observation_features=obs_feats,
+                inject_dummy_values_to_complete_flat_parameterization=(
+                    self.inject_dummy_values_to_complete_flat_parameterization
+                ),
+                use_random_dummy_values=self.use_random_dummy_values,
+            )
             for obs_feats in observation_features
         ]
 
     def untransform_observation_features(
-        self, observation_features: List[ObservationFeatures]
-    ) -> List[ObservationFeatures]:
+        self, observation_features: list[ObservationFeatures]
+    ) -> list[ObservationFeatures]:
         """Untransform observation features by casting parameter values to their
         expected types and removing parameter values that are not applicable given
         the values of other parameters and the hierarchical structure of the search
@@ -114,8 +142,8 @@ class Cast(Transform):
             return observation_features
 
         return [
-            checked_cast(
-                HierarchicalSearchSpace, self.search_space
+            assert_is_instance(
+                self.search_space, HierarchicalSearchSpace
             ).cast_observation_features(observation_features=obs_feats)
             for obs_feats in observation_features
         ]

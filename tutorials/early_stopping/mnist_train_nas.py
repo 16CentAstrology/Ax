@@ -51,7 +51,6 @@ def parse_args():
 args = parse_args()
 
 PATH_DATASETS = os.environ.get("PATH_DATASETS", ".")
-AVAIL_GPUS = min(1, torch.cuda.device_count())
 
 
 class MnistModel(LightningModule):
@@ -137,7 +136,6 @@ class MnistModel(LightningModule):
 
 
 def run_training_job():
-
     mnist_model = MnistModel()
 
     # Initialize a trainer
@@ -145,7 +143,6 @@ def run_training_job():
     trainer = Trainer(
         logger=logger,
         log_every_n_steps=1,
-        gpus=AVAIL_GPUS,
         max_epochs=args.epochs,
         enable_progress_bar=False,
         deterministic=True,  # Do we want a bit of noise?

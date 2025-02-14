@@ -6,8 +6,9 @@
 
 # pyre-strict
 
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 from unittest.mock import MagicMock, patch
 
@@ -33,5 +34,10 @@ def mock_patch_method_original(
         return original_method(self, *args, **kwargs)
 
     patcher = patch(mock_path, autospec=True, side_effect=side_effect)
-    yield patcher.start()
+    try:
+        yield patcher.start()
+    except Exception as e:
+        # tear down the patch if the `original_method` fails
+        patcher.stop()
+        raise e
     patcher.stop()

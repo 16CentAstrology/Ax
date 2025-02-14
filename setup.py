@@ -8,8 +8,7 @@ import os
 
 from setuptools import find_packages, setup
 
-# TODO: read pinned Botorch version from a shared source
-PINNED_BOTORCH_VERSION = "0.8.0"
+PINNED_BOTORCH_VERSION = "0.13.0"
 
 if os.environ.get("ALLOW_BOTORCH_LATEST"):
     # allows a more recent previously installed version of botorch to remain
@@ -25,31 +24,37 @@ REQUIRES = [
     "pandas",
     "scipy",
     "scikit-learn",
-    # ipywidgets 8.0.0 is incompatible with Plotly >=5.7.0
-    # https://github.com/plotly/plotly.py/issues/3686
-    "ipywidgets<8.0.0",
-    "plotly",
-    "typeguard",
+    "ipywidgets",
+    # Needed for compatibility with ipywidgets >= 8.0.0
+    "plotly>=5.12.0",
+    "pyre-extensions",
+    "sympy",
 ]
 
 # pytest-cov requires pytest >= 3.6
 DEV_REQUIRES = [
     "beautifulsoup4",
-    "black==22.3.0",
+    "black==24.2.0",
     "flake8",
     "hypothesis",
     "Jinja2",
+    "pyfakefs",
     "pytest>=4.6",
     "pytest-cov",
-    "sphinx==5.3.0",
-    "sphinx-autodoc-typehints==1.19.5",
+    "sphinx",
+    "sphinx-autodoc-typehints",
+    "sphinx_rtd_theme",
     "torchvision>=0.5.0",
     "nbconvert",
     "jupyter-client==6.1.12",
-    "yappi",
+    # Replace with `tensorboard >= x.x` once tb cuts a release.
+    # https://github.com/tensorflow/tensorboard/issues/6869#issuecomment-2273718763
+    "numpy<2.0",
+    "lxml",
+    "mdformat-myst",
 ]
 
-MYSQL_REQUIRES = ["SQLAlchemy>=1.1.13"]
+MYSQL_REQUIRES = ["SQLAlchemy==1.4.17"]
 
 NOTEBOOK_REQUIRES = ["jupyter"]
 
@@ -57,7 +62,9 @@ UNITTEST_MINIMAL_REQUIRES = [
     "tensorboard",  # For tensorboard unit tests.
     "torchvision",  # For torchvision unit tests.
     "torchx",  # For torchx unit tests.
-    "protobuf<4",  # Temporary fix for tensorboard / ray import errors.
+    # Required for building RayTune tutorial notebook and
+    # deserializing data for benchmark suites.
+    "pyarrow",
 ]
 
 UNITTEST_REQUIRES = (
@@ -65,13 +72,15 @@ UNITTEST_REQUIRES = (
 )
 
 TUTORIAL_REQUIRES = UNITTEST_REQUIRES + [
-    "psycopg2",  # Used in example DBSettings in a tutorial (as part of postgres).
     "ray",  # Required for building RayTune tutorial notebook.
     "tabulate",  # Required for building RayTune tutorial notebook.
     "tensorboardX",  # Required for building RayTune tutorial notebook.
     "matplotlib",  # Required for building Multi-objective tutorial notebook.
     "pyro-ppl",  # Required for to call run_inference.
     "pytorch-lightning",  # For the early stopping tutorial.
+    "papermill",  # For executing the tutorials.
+    "submitit",  # Required for building the SubmitIt notebook.
+    "mdformat",
 ]
 
 
@@ -85,7 +94,7 @@ def local_version(version):
 def setup_package() -> None:
     """Used for installing the Ax package."""
 
-    with open("README.md", "r") as fh:
+    with open("README.md") as fh:
         long_description = fh.read()
 
     setup(
@@ -103,7 +112,7 @@ def setup_package() -> None:
         ],
         long_description=long_description,
         long_description_content_type="text/markdown",
-        python_requires=">=3.8",
+        python_requires=">=3.10",
         install_requires=REQUIRES,
         packages=find_packages(),
         package_data={

@@ -4,12 +4,17 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from collections import defaultdict
 from logging import Logger
-from typing import Dict, List, Tuple
 
 import pandas as pd
+from ax.core.experiment import Experiment
+from ax.core.map_data import MapData
+from ax.core.trial_status import TrialStatus
 from ax.utils.common.logger import get_logger
+from pyre_extensions import assert_is_instance
 
 logger: Logger = get_logger(__name__)
 
@@ -17,11 +22,11 @@ logger: Logger = get_logger(__name__)
 def align_partial_results(
     df: pd.DataFrame,
     progr_key: str,  # progression key
-    metrics: List[str],
+    metrics: list[str],
     interpolation: str = "slinear",
     do_forward_fill: bool = False,
     # TODO: Allow normalizing progr_key (e.g. subtract min time stamp)
-) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
+) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
     """Helper function to align partial results with heterogeneous index
 
     Args:
@@ -68,7 +73,7 @@ def align_partial_results(
     # set multi-index over trial, metric, and progression key
     df = df.set_index(["trial_index", "metric_name", progr_key])
     # sort index
-    df = df.sort_index(level=["trial_index", progr_key])
+    df = df.sort_index()
     # drop sem if all NaN (assumes presence of sem column)
     has_sem = not df["sem"].isnull().all()
     if not has_sem:
@@ -93,12 +98,9 @@ def align_partial_results(
                     # do forward fill (with valid observations) to handle instances
                     # where one task only has data for early progressions
                     df_interp = df_interp.fillna(method="pad")
-            except ValueError as e:
+            except ValueError:
                 df_interp = df_ridx
-                logger.info(
-                    f"Got exception `{e}` during interpolation. "
-                    "Using uninterpolated values instead."
-                )
+
             # renaming column to trial index, append results
             dfs_mean[metric].append(df_interp["mean"].rename(tidx))
             if has_sem:
@@ -109,3 +111,68 @@ def align_partial_results(
     dfs_sem = {metric: pd.concat(dfs, axis=1) for metric, dfs in dfs_sem.items()}
 
     return dfs_mean, dfs_sem
+
+
+def estimate_early_stopping_savings(
+    experiment: Experiment,
+    map_key: str | None = None,
+) -> float:
+    """Estimate resource savings due to early stopping by considering
+    COMPLETED and EARLY_STOPPED trials. First, use the mean of final
+    progressions of the set completed trials as a benchmark for the
+    length of a single trial. The savings is then estimated as:
+
+    resource_savings =
+      1 - actual_resource_usage / (num_trials * length of single trial)
+
+    Args:
+        experiment: The experiment.
+        map_key: The map_key to use when computing resource savings.
+
+    Returns:
+        The estimated resource savings as a fraction of total resource usage (i.e.
+        0.11 estimated savings indicates we would expect the experiment to have used 11%
+        more resources without early stopping present).
+    """
+
+    map_data = assert_is_instance(experiment.lookup_data(), MapData)
+
+    # If no map_key is provided, use some arbitrary map_key in the experiment's MapData
+    if map_key is not None:
+        step_key = map_key
+    elif len(map_data.map_key_infos) > 0:
+        step_key = map_data.map_key_infos[0].key
+    else:
+        return 0
+
+    # Get final number of steps of each trial
+    trial_resources = (
+        map_data.map_df[["trial_index", step_key]]
+        .groupby("trial_index")
+        .max()
+        .reset_index()
+    )
+
+    early_stopped_trial_idcs = experiment.trial_indices_by_status[
+        TrialStatus.EARLY_STOPPED
+    ]
+    completed_trial_idcs = experiment.trial_indices_by_status[TrialStatus.COMPLETED]
+
+    # Assume that any early stopped trial would have had the mean number of steps of
+    # the completed trials
+    mean_completed_trial_resources = trial_resources[
+        trial_resources["trial_index"].isin(completed_trial_idcs)
+    ][step_key].mean()
+
+    # Calculate the steps saved per early stopped trial. If savings are estimated to be
+    # negative assume no savings
+    stopped_trial_resources = trial_resources[
+        trial_resources["trial_index"].isin(early_stopped_trial_idcs)
+    ][step_key]
+    saved_trial_resources = (
+        mean_completed_trial_resources - stopped_trial_resources
+    ).clip(0)
+
+    # Return the ratio of the total saved resources over the total resources used plus
+    # the total saved resources
+    return saved_trial_resources.sum() / trial_resources[step_key].sum()
